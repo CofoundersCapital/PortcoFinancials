@@ -1,0 +1,604 @@
+function getOrCreateTrackerSpreadsheet_() {
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    return active;
+  }
+
+  const existingId = getScriptProperty_(PROPERTY_KEYS.TRACKER_SPREADSHEET_ID);
+  if (existingId) {
+    try {
+      return SpreadsheetApp.openById(existingId);
+    } catch (err) {
+      clearScriptProperty_(PROPERTY_KEYS.TRACKER_SPREADSHEET_ID);
+    }
+  }
+
+  return SpreadsheetApp.create(CONFIG.TRACKER_FILENAME);
+}
+
+function getTrackerSpreadsheet_() {
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    return active;
+  }
+
+  const id = getScriptProperty_(PROPERTY_KEYS.TRACKER_SPREADSHEET_ID);
+  if (!id) {
+    throw new Error('Tracker spreadsheet is not configured. Run setupTracker() first.');
+  }
+  return SpreadsheetApp.openById(id);
+}
+
+function getTrackerSheet_() {
+  const sheet = getTrackerSpreadsheet_().getSheetByName(CONFIG.TRACKER_SHEET_NAME);
+  if (!sheet) {
+    throw new Error('Missing tracker sheet "' + CONFIG.TRACKER_SHEET_NAME + '". Run setupTracker() first.');
+  }
+  return sheet;
+}
+
+function getLogsSheet_() {
+  const ss = getTrackerSpreadsheet_();
+  const sheet = ss.getSheetByName(CONFIG.LOGS_SHEET_NAME) || ss.insertSheet(CONFIG.LOGS_SHEET_NAME);
+  if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
+    sheet.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function getOrCreateSheet_(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function getRequiredDocs_() {
+  const ss = getTrackerSpreadsheet_();
+  const sheet = ss.getSheetByName(CONFIG.REQUIRED_DOCS_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) {
+    return CONFIG.DEFAULT_DOCS.slice();
+  }
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+  const docs = values
+    .filter(function (row) {
+      return row[0] && row[1];
+    })
+    .map(function (row) {
+      return {
+        doc_key: sanitizeDocKey_(row[0]),
+        display_name: String(row[1]).trim(),
+        accepted_extensions: String(row[2] || '').trim()
+      };
+    });
+
+  return docs.length ? docs : CONFIG.DEFAULT_DOCS.slice();
+}
+
+function buildSubmissionHeaders_(docs) {
+  const docHeaders = [];
+  docs.forEach(function (doc) {
+    docHeaders.push('doc_' + doc.doc_key + '_status');
+    docHeaders.push('doc_' + doc.doc_key + '_date');
+  });
+  return BASE_SUBMISSION_HEADERS.concat(docHeaders).concat(TRAILING_SUBMISSION_HEADERS);
+}
+
+function ensureTrackerColumns_(sheet, docs) {
+  const desiredHeaders = buildSubmissionHeaders_(docs);
+  const currentHeaders = getHeaders_(sheet);
+
+  if (currentHeaders.length === 0 || currentHeaders[0] === '') {
+    sheet.getRange(1, 1, 1, desiredHeaders.length).setValues([desiredHeaders]);
+    return;
+  }
+
+  desiredHeaders.forEach(function (header) {
+    if (currentHeaders.indexOf(header) === -1) {
+      sheet.insertColumnAfter(sheet.getLastColumn());
+      sheet.getRange(1, sheet.getLastColumn()).setValue(header);
+    }
+  });
+}
+
+function getHeaders_(sheet) {
+  if (sheet.getLastColumn() === 0) {
+    return [];
+  }
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+}
+
+function getHeaderMap_(sheet) {
+  const headers = getHeaders_(sheet);
+  const map = {};
+  headers.forEach(function (header, index) {
+    if (header) {
+      map[header] = index + 1;
+    }
+  });
+  return map;
+}
+
+function setCellByHeader_(sheet, rowNumber, header, value) {
+  const map = getHeaderMap_(sheet);
+  if (!map[header]) {
+    throw new Error('Missing tracker column: ' + header);
+  }
+  sheet.getRange(rowNumber, map[header]).setValue(value);
+}
+
+function getCellByHeader_(sheet, rowNumber, header) {
+  const map = getHeaderMap_(sheet);
+  if (!map[header]) {
+    return '';
+  }
+  return sheet.getRange(rowNumber, map[header]).getValue();
+}
+
+function applySubmissionFormulas_(sheet, rowNumber, docs) {
+  const headers = getHeaders_(sheet);
+  setCellByHeader_(sheet, rowNumber, 'all_complete', buildAllCompleteFormula_(rowNumber, docs, headers));
+  setCellByHeader_(sheet, rowNumber, 'days_overdue', buildDaysOverdueFormula_(rowNumber, headers));
+}
+
+function buildAllCompleteFormula_(rowNumber, docs, headers) {
+  const tests = docs.map(function (doc) {
+    const col = headers.indexOf('doc_' + doc.doc_key + '_status') + 1;
+    return columnToLetter_(col) + rowNumber + '="received"';
+  });
+  return '=AND(' + tests.join(',') + ')';
+}
+
+function buildDaysOverdueFormula_(rowNumber, headers) {
+  const allCompleteCol = columnToLetter_(headers.indexOf('all_complete') + 1);
+  const deadlineCol = columnToLetter_(headers.indexOf('deadline') + 1);
+  return '=IF(' + allCompleteCol + rowNumber + ',0,MAX(0,TODAY()-' + deadlineCol + rowNumber + '))';
+}
+
+function applyStatusValidation_(sheet, docs) {
+  const headers = getHeaders_(sheet);
+  const validation = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['missing', 'received'], true)
+    .setAllowInvalid(false)
+    .build();
+
+  docs.forEach(function (doc) {
+    const col = headers.indexOf('doc_' + doc.doc_key + '_status') + 1;
+    if (col > 0) {
+      sheet.getRange(2, col, sheet.getMaxRows() - 1, 1).setDataValidation(validation);
+    }
+  });
+}
+
+function applyTrackerNumberFormats_(sheet, headers) {
+  const monthCol = headers.indexOf('month') + 1;
+  const deadlineCol = headers.indexOf('deadline') + 1;
+  const daysCol = headers.indexOf('days_overdue') + 1;
+  const reminderCountCol = headers.indexOf('reminder_count') + 1;
+
+  if (monthCol > 0) {
+    sheet.getRange(2, monthCol, sheet.getMaxRows() - 1, 1).setNumberFormat('@');
+  }
+  if (deadlineCol > 0) {
+    sheet.getRange(2, deadlineCol, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
+  }
+  ['last_reminder_at', 'escalated_at'].forEach(function (header) {
+    const col = headers.indexOf(header) + 1;
+    if (col > 0) {
+      sheet.getRange(2, col, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    }
+  });
+  headers.forEach(function (header, index) {
+    if (header.indexOf('doc_') === 0 && header.slice(-5) === '_date') {
+      sheet.getRange(2, index + 1, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    }
+  });
+  if (daysCol > 0) {
+    sheet.getRange(2, daysCol, sheet.getMaxRows() - 1, 1).setNumberFormat('0');
+  }
+  if (reminderCountCol > 0) {
+    sheet.getRange(2, reminderCountCol, sheet.getMaxRows() - 1, 1).setNumberFormat('0');
+  }
+}
+
+function applyConditionalFormatting_(sheet) {
+  const headers = getHeaders_(sheet);
+  const allCompleteCol = columnToLetter_(headers.indexOf('all_complete') + 1);
+  const daysOverdueCol = columnToLetter_(headers.indexOf('days_overdue') + 1);
+  const escalatedCol = columnToLetter_(headers.indexOf('escalated_at') + 1);
+  const range = sheet.getRange(2, 1, sheet.getMaxRows() - 1, headers.length);
+
+  const rules = [
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=$' + allCompleteCol + '2=TRUE')
+      .setBackground('#d9ead3')
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($' + escalatedCol + '2<>"",$' + allCompleteCol + '2=FALSE)')
+      .setBackground('#fce5cd')
+      .setRanges([range])
+      .build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($' + daysOverdueCol + '2>0,$' + allCompleteCol + '2=FALSE)')
+      .setBackground('#f4cccc')
+      .setRanges([range])
+      .build()
+  ];
+
+  sheet.setConditionalFormatRules(rules);
+}
+
+function findSubmissionRow_(companyName, month) {
+  const sheet = getTrackerSheet_();
+  const data = getRecords_(sheet);
+  const normalizedCompany = normalizeText_(companyName);
+  for (let i = 0; i < data.length; i++) {
+    if (normalizeText_(data[i].record.company_name) === normalizedCompany && String(data[i].record.month) === String(month)) {
+      return data[i].rowNumber;
+    }
+  }
+  return -1;
+}
+
+function getRecordAtRow_(sheet, rowNumber) {
+  const headers = getHeaders_(sheet);
+  const values = sheet.getRange(rowNumber, 1, 1, headers.length).getValues()[0];
+  const record = {};
+  headers.forEach(function (header, index) {
+    record[header] = values[index];
+  });
+  return record;
+}
+
+function getRecords_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+  const headers = getHeaders_(sheet);
+  const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  return values.map(function (row, index) {
+    const record = {};
+    headers.forEach(function (header, headerIndex) {
+      record[header] = row[headerIndex];
+    });
+    return {
+      rowNumber: index + 2,
+      record: record
+    };
+  });
+}
+
+function getLatestCompanyProfiles_() {
+  const sheet = getTrackerSheet_();
+  const records = getRecords_(sheet);
+  const byCompany = {};
+
+  records.forEach(function (entry) {
+    const record = entry.record;
+    if (!record.company_name) {
+      return;
+    }
+    const key = normalizeText_(record.company_name);
+    if (!byCompany[key] || String(record.month) > String(byCompany[key].month)) {
+      byCompany[key] = {
+        month: record.month,
+        company_name: record.company_name,
+        ceo_name: record.ceo_name,
+        ceo_email: record.ceo_email,
+        board_member_name: record.board_member_name,
+        board_member_email: record.board_member_email
+      };
+    }
+  });
+
+  return Object.keys(byCompany).map(function (key) {
+    return byCompany[key];
+  });
+}
+
+function getCompanyNames_() {
+  return getLatestCompanyProfiles_()
+    .map(function (profile) {
+      return profile.company_name;
+    })
+    .filter(function (name, index, names) {
+      return name && names.indexOf(name) === index;
+    })
+    .sort();
+}
+
+function getRootFolder_(createIfMissing) {
+  const existingId = getScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID);
+  if (existingId) {
+    try {
+      return DriveApp.getFolderById(existingId);
+    } catch (err) {
+      clearScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID);
+    }
+  }
+
+  const folders = DriveApp.getFoldersByName(CONFIG.ROOT_FOLDER_NAME);
+  if (folders.hasNext()) {
+    const folder = folders.next();
+    setScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID, folder.getId());
+    return folder;
+  }
+
+  if (!createIfMissing) {
+    return null;
+  }
+
+  const folder = DriveApp.createFolder(CONFIG.ROOT_FOLDER_NAME);
+  setScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID, folder.getId());
+  return folder;
+}
+
+function getNamedFolder_(parentFolder, name, createIfMissing) {
+  const folders = parentFolder.getFoldersByName(name);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  if (!createIfMissing) {
+    return null;
+  }
+  return parentFolder.createFolder(name);
+}
+
+function getCompanyFolder_(companyName, createIfMissing) {
+  return getNamedFolder_(getRootFolder_(createIfMissing), companyName, createIfMissing);
+}
+
+function getCompanyMonthFolder_(companyName, month, createIfMissing) {
+  const companyFolder = getCompanyFolder_(companyName, createIfMissing);
+  if (!companyFolder) {
+    return null;
+  }
+  return getNamedFolder_(companyFolder, month, createIfMissing);
+}
+
+function moveFileToFolder_(file, folder) {
+  try {
+    file.moveTo(folder);
+  } catch (err) {
+    folder.addFile(file);
+  }
+}
+
+function getUploadForm_(throwIfMissing) {
+  const formId = getScriptProperty_(PROPERTY_KEYS.UPLOAD_FORM_ID);
+  if (!formId) {
+    if (throwIfMissing) {
+      throw new Error('Upload form is not configured. Run setupUploadForm() first.');
+    }
+    return null;
+  }
+  try {
+    return FormApp.openById(formId);
+  } catch (err) {
+    if (throwIfMissing) {
+      throw err;
+    }
+    clearScriptProperty_(PROPERTY_KEYS.UPLOAD_FORM_ID);
+    return null;
+  }
+}
+
+function getFormUrl_() {
+  const form = getUploadForm_(false);
+  return form ? form.getPublishedUrl() : CONFIG.FORM_URL;
+}
+
+function findFormItemByTitle_(form, title) {
+  const items = form.getItems();
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].getTitle() === title) {
+      return items[i];
+    }
+  }
+  return null;
+}
+
+function findDocByDisplayName_(displayName) {
+  const normalized = normalizeText_(displayName);
+  const docs = getRequiredDocs_();
+  for (let i = 0; i < docs.length; i++) {
+    if (normalizeText_(docs[i].display_name) === normalized) {
+      return docs[i];
+    }
+  }
+  return null;
+}
+
+function getMissingDocs_(record, docs) {
+  return docs.filter(function (doc) {
+    return String(record['doc_' + doc.doc_key + '_status'] || '').toLowerCase() !== 'received';
+  });
+}
+
+function isRecordComplete_(record, docs) {
+  return getMissingDocs_(record, docs).length === 0;
+}
+
+function calculateDaysOverdue_(deadline, now) {
+  if (!deadline) {
+    return 0;
+  }
+  const deadlineDate = asDate_(deadline);
+  const currentDate = now ? asDate_(now) : new Date();
+  const startCurrent = startOfDay_(currentDate);
+  const startDeadline = startOfDay_(deadlineDate);
+  const days = Math.floor((startCurrent.getTime() - startDeadline.getTime()) / 86400000);
+  return Math.max(0, days);
+}
+
+function getDeadlineForReportingMonth_(month) {
+  const parts = parseMonth_(month);
+  return new Date(parts.year, parts.monthIndex + 1, CONFIG.TARGET_DAY_OF_MONTH);
+}
+
+function getDefaultReportingMonth_(date) {
+  const day = Number(Utilities.formatDate(date, CONFIG.TIMEZONE, 'd'));
+  if (day <= CONFIG.TARGET_DAY_OF_MONTH) {
+    return formatMonth_(addMonths_(date, -1));
+  }
+  return formatMonth_(date);
+}
+
+function getPreviousMonth_(date) {
+  return formatMonth_(addMonths_(date, -1));
+}
+
+function parseMonth_(month) {
+  if (!isValidMonth_(month)) {
+    throw new Error('Invalid month "' + month + '". Use YYYY-MM.');
+  }
+  const parts = String(month).split('-');
+  return {
+    year: Number(parts[0]),
+    month: Number(parts[1]),
+    monthIndex: Number(parts[1]) - 1
+  };
+}
+
+function isValidMonth_(month) {
+  return /^\d{4}-\d{2}$/.test(String(month || ''));
+}
+
+function formatMonth_(date) {
+  return Utilities.formatDate(date, CONFIG.TIMEZONE, 'yyyy-MM');
+}
+
+function formatDate_(date) {
+  if (!date) {
+    return '';
+  }
+  return Utilities.formatDate(asDate_(date), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+}
+
+function formatDateTime_(date) {
+  if (!date) {
+    return '';
+  }
+  return Utilities.formatDate(asDate_(date), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
+}
+
+function startOfDay_(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addMonths_(date, monthDelta) {
+  return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1);
+}
+
+function asDate_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return value;
+  }
+  return new Date(value);
+}
+
+function columnToLetter_(column) {
+  let temp = '';
+  let letter = '';
+  while (column > 0) {
+    temp = (column - 1) % 26;
+    letter = String.fromCharCode(temp + 65) + letter;
+    column = (column - temp - 1) / 26;
+  }
+  return letter;
+}
+
+function splitExtensions_(acceptedExtensions) {
+  return String(acceptedExtensions || '')
+    .split(',')
+    .map(function (value) {
+      return value.trim().toLowerCase().replace(/^\./, '');
+    })
+    .filter(Boolean);
+}
+
+function getFileExtension_(fileName) {
+  const match = String(fileName || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : '';
+}
+
+function sanitizeDocKey_(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function normalizeText_(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function truncate_(text, maxChars) {
+  const value = String(text || '');
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return value.slice(0, maxChars) + '\n[TRUNCATED after ' + maxChars + ' characters]';
+}
+
+function escapeRegExp_(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function safeJsonStringify_(value) {
+  try {
+    return JSON.stringify(value || {});
+  } catch (err) {
+    return JSON.stringify({ error: 'Unable to stringify payload', message: err.message });
+  }
+}
+
+function logEvent_(eventType, companyName, month, message, payload) {
+  const sheet = getLogsSheet_();
+  sheet.appendRow([
+    new Date(),
+    eventType,
+    companyName || '',
+    month || '',
+    message || '',
+    safeJsonStringify_(payload || {})
+  ]);
+}
+
+function getScriptProperty_(key) {
+  return PropertiesService.getScriptProperties().getProperty(key);
+}
+
+function setScriptProperty_(key, value) {
+  PropertiesService.getScriptProperties().setProperty(key, String(value));
+}
+
+function clearScriptProperty_(key) {
+  PropertiesService.getScriptProperties().deleteProperty(key);
+}
+
+function hasTrigger_(handlerFunction) {
+  return ScriptApp.getProjectTriggers().some(function (trigger) {
+    return trigger.getHandlerFunction() === handlerFunction;
+  });
+}
+
+function ensureTimeTrigger_(handlerFunction, label, builderFactory) {
+  if (hasTrigger_(handlerFunction)) {
+    return;
+  }
+  builderFactory().create();
+  logEvent_('trigger_installed', '', '', 'Installed ' + label + ' trigger', {
+    handlerFunction: handlerFunction
+  });
+}
+
+function appendNote_(sheet, rowNumber, note) {
+  const existing = String(getCellByHeader_(sheet, rowNumber, 'notes') || '').trim();
+  const stamped = '[' + formatDateTime_(new Date()) + '] ' + note;
+  setCellByHeader_(sheet, rowNumber, 'notes', existing ? existing + '\n' + stamped : stamped);
+}
