@@ -5,6 +5,11 @@ const CONFIG = {
   LOGS_SHEET_NAME: 'Logs',
   REQUIRED_DOCS_SHEET_NAME: 'Required Documents Checklist',
   FORM_TITLE: 'Monthly Financial Submission',
+  INTAKE_EMAIL: 'reporting@cfc.com',
+  GMAIL_LOOKBACK_DAYS: 90,
+  GMAIL_SEARCH_BATCH_SIZE: 50,
+  GMAIL_PROCESSED_LABEL: 'CFC_Reporting_Processed',
+  GMAIL_NEEDS_REVIEW_LABEL: 'CFC_Reporting_Needs_Review',
   TARGET_DAY_OF_MONTH: 10,
   REMINDER_INTERVAL_DAYS: 3,
   ESCALATION_THRESHOLD_DAYS: 10,
@@ -83,6 +88,7 @@ function onOpen() {
     .addItem('Generate flash report for selected row', 'generateFlashReportForActiveRow')
     .addSeparator()
     .addItem('Run reminder sweep now', 'dailyReminderSweep')
+    .addItem('Run email inbox watcher now', 'gmailInboxWatcher')
     .addItem('Run Drive folder watcher now', 'driveFolderWatcher')
     .addToUi();
 }
@@ -106,6 +112,12 @@ function installTriggers() {
 
   ensureTimeTrigger_('driveFolderWatcher', 'watcher', function () {
     return ScriptApp.newTrigger('driveFolderWatcher')
+      .timeBased()
+      .everyMinutes(30);
+  });
+
+  ensureTimeTrigger_('gmailInboxWatcher', 'email watcher', function () {
+    return ScriptApp.newTrigger('gmailInboxWatcher')
       .timeBased()
       .everyMinutes(30);
   });

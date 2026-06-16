@@ -12,19 +12,18 @@ function setupTracker() {
   setupSubmissionsSheet_(ss);
   setupLogsSheet_(ss);
   ensureFlashReportTemplate_(configFolder);
-
-  setupUploadForm();
-  updateFormCompanyChoices();
+  setupEmailIntake_();
 
   logEvent_('setup_complete', '', '', 'Tracker setup completed', {
     spreadsheetUrl: ss.getUrl(),
-    rootFolderUrl: rootFolder.getUrl()
+    rootFolderUrl: rootFolder.getUrl(),
+    intakeEmail: CONFIG.INTAKE_EMAIL
   });
 
   return {
     spreadsheetUrl: ss.getUrl(),
     rootFolderUrl: rootFolder.getUrl(),
-    formUrl: getFormUrl_()
+    intakeEmail: CONFIG.INTAKE_EMAIL
   };
 }
 
@@ -63,23 +62,20 @@ function setupUploadForm() {
       .build());
 
   docs.forEach(function (doc) {
-    const item = form.addFileUploadItem()
+    form.addParagraphTextItem()
       .setTitle(doc.display_name)
-      .setHelpText('Accepted extensions: ' + doc.accepted_extensions)
-      .setRequired(true)
-      .setMaxFiles(1);
-    applyAllowedFileTypes_(item, doc.accepted_extensions);
+      .setHelpText('Paste the Google Drive file link after uploading this file to your shared company folder. Accepted extensions: ' + doc.accepted_extensions)
+      .setRequired(false);
   });
 
   form.addParagraphTextItem()
     .setTitle('Notes')
     .setRequired(false);
 
-  const otherItem = form.addFileUploadItem()
+  form.addParagraphTextItem()
     .setTitle('Other / Supporting Documents')
     .setRequired(false)
-    .setMaxFiles(5);
-  otherItem.setHelpText('Optional supporting materials requested by CFC.');
+    .setHelpText('Optional: paste Google Drive links for supporting materials requested by CFC.');
 
   setScriptProperty_(PROPERTY_KEYS.UPLOAD_FORM_ID, form.getId());
   logEvent_('form_setup', '', '', 'Upload form created or refreshed', {

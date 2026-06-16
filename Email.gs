@@ -8,9 +8,9 @@ const EMAIL_TEMPLATES = {
       '',
       '{{missing_docs_bulleted}}',
       '',
-      'You can upload them here: {{form_url}}',
+      'Please reply with the missing files attached, or email them to {{intake_email}} with {{company_name}} and {{month}} in the subject line.',
       '',
-      'Or drop them in your shared folder: {{folder_url}}',
+      'You can also drop files in your shared folder: {{folder_url}}',
       '',
       'Thanks,',
       'CFC Team (automated reminder)'
@@ -25,9 +25,9 @@ const EMAIL_TEMPLATES = {
       '',
       '{{missing_docs_bulleted}}',
       '',
-      'You can upload them here: {{form_url}}',
+      'Please reply with the missing files attached, or email them to {{intake_email}} with {{company_name}} and {{month}} in the subject line.',
       '',
-      'Or drop them in your shared folder: {{folder_url}}',
+      'You can also drop files in your shared folder: {{folder_url}}',
       '',
       'Thanks,',
       'CFC Team (automated reminder)'
@@ -147,6 +147,7 @@ function buildEmailContext_(record, docs) {
     missing_docs_bulleted: missingDocs.map(function (doc) {
       return '- ' + doc.display_name;
     }).join('\n'),
+    intake_email: CONFIG.INTAKE_EMAIL,
     form_url: getFormUrl_(),
     folder_url: companyFolder ? companyFolder.getUrl() : '',
     tracker_url: getTrackerSpreadsheet_().getUrl()
