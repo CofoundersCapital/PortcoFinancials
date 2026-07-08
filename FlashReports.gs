@@ -20,8 +20,8 @@ function generateFlashReport(companyName, month) {
     };
   });
 
-  const prompt = buildClaudeExtractionPrompt_(companyName, month, extractedFiles);
-  const extraction = claudeExtract(prompt);
+  const prompt = buildOpenAIExtractionPrompt_(companyName, month, extractedFiles);
+  const extraction = openaiExtract(prompt);
   const reportFile = fillDocTemplate_(companyName, month, extraction, folder);
   const rowNumber = findSubmissionRow_(companyName, month);
 
@@ -155,7 +155,7 @@ function pdfToText_(file) {
   }
 }
 
-function buildClaudeExtractionPrompt_(companyName, month, extractedFiles) {
+function buildOpenAIExtractionPrompt_(companyName, month, extractedFiles) {
   const sourceText = extractedFiles.map(function (file) {
     return [
       '--- FILE: ' + file.name + ' ---',
@@ -172,7 +172,7 @@ function buildClaudeExtractionPrompt_(companyName, month, extractedFiles) {
     'Source files (text-extracted, may be messy):',
     sourceText,
     '',
-    'Return ONLY a JSON object with these fields. Use null for any field you cannot determine confidently. Do not guess.',
+    'Return a JSON object matching the configured schema. Use null for any field you cannot determine confidently. Do not guess.',
     '',
     '{',
     '  "revenue_month": number | null,',

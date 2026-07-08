@@ -6,9 +6,10 @@ This repo contains files for automatically tracking portco financials inside Goo
 4. Go to Settings -> Show "appscript.json" ...
 5. Paste in the appscript.json file
 6. Set `INTAKE_EMAIL` in `Code.gs` to the dedicated inbox, for example `reporting@cofounderscapital.com`
-7. Run setupTracker() in [Setup.gs](http://Setup.gs) and auth
-8. Run `installTriggers()` in [Code.gs](http://Code.gs)
-9. On refresh, go to CFC Reporting -> Onboard company from prompts
+7. Add an Apps Script property named `OPENAI_API_KEY` with your OpenAI API key
+8. Run setupTracker() in [Setup.gs](http://Setup.gs) and auth
+9. Run `installTriggers()` in [Code.gs](http://Code.gs)
+10. On refresh, go to CFC Reporting -> Onboard company from prompts
 
 Email intake:
 
@@ -20,5 +21,7 @@ Email intake:
 - Successfully processed threads are labeled `CFC_Reporting_Processed`.
 
 Google Forms are now optional. Google Forms can contain file upload questions, but Google's APIs do not currently support creating those questions programmatically. The generated form therefore asks CEOs to upload files into their shared Drive folder and paste Drive file links into the form. The `driveFolderWatcher()` trigger also marks files received when they are dropped directly into the company/month folder.
+
+Flash report generation uses the OpenAI Responses API. The default model is configured in `Code.gs` as `OPENAI_MODEL`.
 
 Still need to test - waiting for my CFC account 2FA to be fixed. 
