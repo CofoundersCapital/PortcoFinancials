@@ -47,6 +47,18 @@ function getLogsSheet_() {
   return sheet;
 }
 
+function getClassificationLogSheet_() {
+  const ss = getTrackerSpreadsheet_();
+  const sheet = ss.getSheetByName(CONFIG.CLASSIFICATION_LOG_SHEET_NAME) || ss.insertSheet(CONFIG.CLASSIFICATION_LOG_SHEET_NAME);
+  if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
+    sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setValues([CLASSIFICATION_LOG_HEADERS]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
+    sheet.getRange(1, 1, sheet.getMaxRows(), CLASSIFICATION_LOG_HEADERS.length).createFilter();
+  }
+  return sheet;
+}
+
 function getOrCreateSheet_(ss, name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);
 }

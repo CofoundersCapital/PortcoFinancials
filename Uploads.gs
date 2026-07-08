@@ -30,6 +30,11 @@ function onFormSubmit(e) {
   submittedFileIds.forEach(function (fileId) {
     const classification = processSubmittedChecklistFile_(fileId, docs, getMissingDocs_(beforeRecord, docs), sheet, rowNumber, beforeRecord);
     const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+    logDocumentClassificationAudit_(classification, {
+      source: 'form_upload',
+      companyName: submission.companyName,
+      month: submission.month
+    }, matchedDocs);
     if (classification.matchedDocs.length > 0 && matchedDocs.length === 0) {
       return;
     }
@@ -85,6 +90,11 @@ function driveFolderWatcher() {
     listFilesInFolder_(folder).forEach(function (file) {
       const classification = classifyDriveFileForDocs_(file, docs, missingDocs);
       const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      logDocumentClassificationAudit_(classification, {
+        source: 'drive_watcher',
+        companyName: record.company_name,
+        month: record.month
+      }, matchedDocs);
       if (classification.matchedDocs.length === 0) {
         recordDocumentClassificationNeedsReview_(sheet, entry.rowNumber, record, 'drive_watcher', file, classification.reason, classification.raw);
         return;
@@ -179,6 +189,11 @@ function processGmailThread_(thread, sheet, docs) {
     attachments.forEach(function (attachment) {
       const classification = classifyEmailAttachmentForDocs_(attachment, docs, missingDocs);
       const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      logDocumentClassificationAudit_(classification, {
+        source: 'gmail_attachment',
+        companyName: record.company_name,
+        month: record.month
+      }, matchedDocs);
       if (classification.matchedDocs.length === 0) {
         unmatchedAttachmentNames.push(attachment.getName());
         saveSingleEmailAttachmentForReview_(attachment, message, classification.reason || 'Could not classify attachment as a required document.');
@@ -396,9 +411,23 @@ function classifyDriveFileForDocs_(file, docs, missingDocs, overrides) {
   const mimeType = overrides && overrides.mimeType ? overrides.mimeType : file.getMimeType();
   const extension = getFileExtension_(fileName) || extensionFromMimeType_(mimeType);
   const candidateDocs = getCandidateDocsForExtension_(docs, extension);
+  const fileUrl = overrides && Object.prototype.hasOwnProperty.call(overrides, 'fileUrl')
+    ? overrides.fileUrl
+    : getDriveFileUrl_(file);
+  const fileInfo = {
+    fileName: fileName,
+    fileUrl: fileUrl,
+    mimeType: mimeType,
+    extension: extension
+  };
 
   if (candidateDocs.length === 0) {
-    return buildDocumentClassificationResult_([], 'No required document types accept extension "' + (extension || 'unknown') + '".', null);
+    return attachDocumentClassificationMetadata_(
+      buildDocumentClassificationResult_([], 'No required document types accept extension "' + (extension || 'unknown') + '".', null),
+      fileInfo,
+      docs,
+      candidateDocs
+    );
   }
 
   let extractedText = '';
@@ -419,10 +448,15 @@ function classifyDriveFileForDocs_(file, docs, missingDocs, overrides) {
       extractedText: extractedText
     });
   } catch (err) {
-    return buildDocumentClassificationResult_([], 'LLM document classification failed: ' + err.message, null);
+    return attachDocumentClassificationMetadata_(
+      buildDocumentClassificationResult_([], 'LLM document classification failed: ' + err.message, null),
+      fileInfo,
+      docs,
+      candidateDocs
+    );
   }
 
-  return normalizeDocumentClassification_(raw, candidateDocs);
+  return attachDocumentClassificationMetadata_(normalizeDocumentClassification_(raw, candidateDocs), fileInfo, docs, candidateDocs);
 }
 
 function classifyEmailAttachmentForDocs_(attachment, docs, missingDocs) {
@@ -431,7 +465,8 @@ function classifyEmailAttachmentForDocs_(attachment, docs, missingDocs) {
     tempFile = createTemporaryClassificationFile_(attachment);
     return classifyDriveFileForDocs_(tempFile, docs, missingDocs, {
       fileName: attachment.getName(),
-      mimeType: attachment.getContentType()
+      mimeType: attachment.getContentType(),
+      fileUrl: ''
     });
   } catch (err) {
     return buildDocumentClassificationResult_([], 'Could not prepare attachment for LLM classification: ' + err.message, null);
@@ -477,24 +512,63 @@ function normalizeDocumentClassification_(raw, candidateDocs) {
   });
 
   const seen = {};
+  const assessments = normalizeDocumentAssessments_(raw, docsByKey, seen);
   const matches = [];
-  (raw && raw.matches ? raw.matches : []).forEach(function (match) {
-    if (!match
-      || !docsByKey[match.doc_key]
-      || ['high', 'medium'].indexOf(match.confidence) < 0
-      || seen[match.doc_key]) {
+  assessments.forEach(function (assessment) {
+    if (!assessment.llmMatch || ['high', 'medium'].indexOf(assessment.confidence) < 0) {
       return;
     }
-
-    seen[match.doc_key] = true;
-    matches.push(docsByKey[match.doc_key]);
+    matches.push(docsByKey[assessment.doc_key]);
   });
 
   const reason = matches.length > 0
     ? ''
     : buildDocumentClassificationNoMatchReason_(raw);
 
-  return buildDocumentClassificationResult_(matches, reason, raw);
+  const result = buildDocumentClassificationResult_(matches, reason, raw);
+  result.assessments = assessments;
+  return result;
+}
+
+function normalizeDocumentAssessments_(raw, docsByKey, seen) {
+  const assessments = [];
+  (raw && raw.assessments ? raw.assessments : []).forEach(function (assessment) {
+    if (!assessment || !docsByKey[assessment.doc_key] || seen[assessment.doc_key]) {
+      return;
+    }
+
+    seen[assessment.doc_key] = true;
+    assessments.push({
+      doc_key: assessment.doc_key,
+      confidence: normalizeClassificationConfidence_(assessment.confidence),
+      llmMatch: assessment.is_match === true,
+      reason: String(assessment.reason || ''),
+      doc: docsByKey[assessment.doc_key]
+    });
+  });
+
+  (raw && raw.matches ? raw.matches : []).forEach(function (match) {
+    if (!match || !docsByKey[match.doc_key] || seen[match.doc_key]) {
+      return;
+    }
+
+    const confidence = normalizeClassificationConfidence_(match.confidence);
+    seen[match.doc_key] = true;
+    assessments.push({
+      doc_key: match.doc_key,
+      confidence: confidence,
+      llmMatch: ['high', 'medium'].indexOf(confidence) >= 0,
+      reason: String(match.reason || ''),
+      doc: docsByKey[match.doc_key]
+    });
+  });
+
+  return assessments;
+}
+
+function normalizeClassificationConfidence_(confidence) {
+  const value = String(confidence || '').toLowerCase();
+  return ['high', 'medium', 'low', 'none'].indexOf(value) >= 0 ? value : 'none';
 }
 
 function buildDocumentClassificationNoMatchReason_(raw) {
@@ -516,8 +590,113 @@ function buildDocumentClassificationResult_(matchedDocs, reason, raw) {
   return {
     matchedDocs: matchedDocs || [],
     reason: reason || '',
-    raw: raw || null
+    raw: raw || null,
+    assessments: []
   };
+}
+
+function attachDocumentClassificationMetadata_(classification, fileInfo, docs, candidateDocs) {
+  classification.fileName = fileInfo.fileName || '';
+  classification.fileUrl = fileInfo.fileUrl || '';
+  classification.mimeType = fileInfo.mimeType || '';
+  classification.extension = fileInfo.extension || '';
+  classification.assessments = buildCompleteDocumentAssessments_(classification, docs, candidateDocs);
+  return classification;
+}
+
+function buildCompleteDocumentAssessments_(classification, docs, candidateDocs) {
+  const candidateKeys = {};
+  candidateDocs.forEach(function (doc) {
+    candidateKeys[doc.doc_key] = true;
+  });
+
+  const assessmentsByKey = {};
+  (classification.assessments || []).forEach(function (assessment) {
+    assessmentsByKey[assessment.doc_key] = assessment;
+  });
+
+  return docs.map(function (doc) {
+    if (assessmentsByKey[doc.doc_key]) {
+      return buildDocumentAssessmentRow_(doc, assessmentsByKey[doc.doc_key].confidence, assessmentsByKey[doc.doc_key].llmMatch, assessmentsByKey[doc.doc_key].reason);
+    }
+
+    if (candidateKeys[doc.doc_key]) {
+      return buildDocumentAssessmentRow_(doc, classification.raw ? 'none' : 'error', false, classification.reason || 'LLM returned no assessment for this candidate document type.');
+    }
+
+    return buildDocumentAssessmentRow_(
+      doc,
+      'not_applicable',
+      false,
+      'File extension "' + (classification.extension || 'unknown') + '" is not accepted for this required document. Accepted extensions: ' + (doc.accepted_extensions || 'any') + '.'
+    );
+  });
+}
+
+function buildDocumentAssessmentRow_(doc, confidence, llmMatch, reason) {
+  return {
+    doc_key: doc.doc_key,
+    display_name: doc.display_name,
+    accepted_extensions: doc.accepted_extensions,
+    confidence: confidence || 'none',
+    llmMatch: llmMatch === true,
+    reason: reason || '',
+    doc: doc
+  };
+}
+
+function getDriveFileUrl_(file) {
+  try {
+    return file.getUrl();
+  } catch (err) {
+    return '';
+  }
+}
+
+function logDocumentClassificationAudit_(classification, context, acceptedDocs) {
+  if (!classification || !classification.assessments || classification.assessments.length === 0) {
+    return;
+  }
+
+  const acceptedKeys = {};
+  (acceptedDocs || []).forEach(function (doc) {
+    acceptedKeys[doc.doc_key] = true;
+  });
+
+  const unmatchedReason = classification.raw && classification.raw.unmatched_reason
+    ? String(classification.raw.unmatched_reason)
+    : classification.reason;
+  const rows = classification.assessments.map(function (assessment) {
+    return [
+      new Date(),
+      context.source || '',
+      context.companyName || '',
+      context.month || '',
+      classification.fileName || '',
+      classification.fileUrl || '',
+      classification.mimeType || '',
+      classification.extension || '',
+      assessment.doc_key || '',
+      assessment.display_name || '',
+      assessment.accepted_extensions || '',
+      assessment.confidence || '',
+      assessment.llmMatch ? 'yes' : 'no',
+      acceptedKeys[assessment.doc_key] ? 'yes' : 'no',
+      assessment.reason || '',
+      unmatchedReason || ''
+    ];
+  });
+
+  try {
+    const sheet = getClassificationLogSheet_();
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, CLASSIFICATION_LOG_HEADERS.length).setValues(rows);
+  } catch (err) {
+    logEvent_('classification_audit_log_error', context.companyName || '', context.month || '', 'Could not append document classification audit rows', {
+      source: context.source,
+      fileName: classification.fileName,
+      error: err.message
+    });
+  }
 }
 
 function filterMatchedDocsForUpdate_(matchedDocs, updatedDocKeys) {

@@ -11,6 +11,7 @@ function setupTracker() {
   setupRequiredDocsSheet_(ss);
   setupSubmissionsSheet_(ss);
   setupLogsSheet_(ss);
+  setupClassificationLogSheet_(ss);
   ensureFlashReportTemplate_(configFolder);
   setupEmailIntake_();
 
@@ -234,6 +235,17 @@ function setupLogsSheet_(ss) {
     sheet.getRange(1, 1, 1, LOG_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
   }
   sheet.autoResizeColumns(1, LOG_HEADERS.length);
+}
+
+function setupClassificationLogSheet_(ss) {
+  const sheet = getOrCreateSheet_(ss, CONFIG.CLASSIFICATION_LOG_SHEET_NAME);
+  if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
+    sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setValues([CLASSIFICATION_LOG_HEADERS]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
+    sheet.getRange(1, 1, sheet.getMaxRows(), CLASSIFICATION_LOG_HEADERS.length).createFilter();
+  }
+  sheet.autoResizeColumns(1, CLASSIFICATION_LOG_HEADERS.length);
 }
 
 function ensureFlashReportTemplate_(configFolder) {

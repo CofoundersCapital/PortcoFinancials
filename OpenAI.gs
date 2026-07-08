@@ -44,7 +44,7 @@ function openaiClassifyDocument_(classificationInput) {
       'Classify portfolio company monthly reporting documents.',
       'Return every required document type that is clearly present in the file.',
       'A single file can satisfy multiple document types, such as financials, model, and forecast in different spreadsheet tabs.',
-      'Use only the provided doc_key values. Use no matches when evidence is weak or ambiguous.'
+      'Assess every candidate doc_key exactly once. Use only the provided doc_key values. Use no matches when evidence is weak or ambiguous.'
     ].join(' '),
     input: [
       {
@@ -125,7 +125,9 @@ function buildDocumentClassificationPrompt_(classificationInput) {
     '',
     'Rules:',
     '- Return all matching doc_key values that are clearly present.',
+    '- In assessments, include exactly one row for every candidate required doc.',
     '- Return multiple matches when one spreadsheet/workbook/PDF contains multiple required materials.',
+    '- Set is_match to true only for high- or medium-confidence matches.',
     '- Return an empty matches array if the file is supporting material, ambiguous, or not one of the candidate required documents.',
     '- Do not infer a match only because a document is still missing.',
     '',
@@ -184,7 +186,7 @@ function getDocumentClassificationSchema_(candidateDocs) {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['matches', 'unmatched_reason'],
+    required: ['matches', 'assessments', 'unmatched_reason'],
     properties: {
       matches: {
         type: 'array',
@@ -201,6 +203,26 @@ function getDocumentClassificationSchema_(candidateDocs) {
               type: 'string',
               enum: ['high', 'medium', 'low']
             },
+            reason: { type: 'string' }
+          }
+        }
+      },
+      assessments: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['doc_key', 'confidence', 'is_match', 'reason'],
+          properties: {
+            doc_key: {
+              type: 'string',
+              enum: docKeys
+            },
+            confidence: {
+              type: 'string',
+              enum: ['high', 'medium', 'low', 'none']
+            },
+            is_match: { type: 'boolean' },
             reason: { type: 'string' }
           }
         }

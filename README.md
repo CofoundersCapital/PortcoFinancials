@@ -19,6 +19,7 @@ Email intake:
 - A single file can satisfy multiple required docs when the LLM finds multiple materials in it, for example a workbook with financials, model, and forecast tabs can mark all three docs received.
 - Emails that cannot be matched or classified are labeled `CFC_Reporting_Needs_Review`, and attachments are saved in `_email_needs_review`.
 - Successfully processed threads are labeled `CFC_Reporting_Processed`.
+- Each LLM classification writes per-document-type audit rows to the `Document Classification Log` sheet, including confidence, reasoning, whether the LLM matched the type, and whether the pipeline accepted that type for the tracker.
 
 Google Forms are now optional. Google Forms can contain file upload questions, but Google's APIs do not currently support creating those questions programmatically. The generated form therefore asks CEOs to upload files into their shared Drive folder and paste Drive file links into the form. The `driveFolderWatcher()` trigger also marks files received when they are dropped directly into the company/month folder.
 

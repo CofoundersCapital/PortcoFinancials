@@ -3,6 +3,7 @@ const CONFIG = {
   TRACKER_FILENAME: 'Submission Tracker',
   TRACKER_SHEET_NAME: 'Submissions',
   LOGS_SHEET_NAME: 'Logs',
+  CLASSIFICATION_LOG_SHEET_NAME: 'Document Classification Log',
   REQUIRED_DOCS_SHEET_NAME: 'Required Documents Checklist',
   FORM_TITLE: 'Monthly Financial Submission',
   INTAKE_EMAIL: 'reporting@cfc.com',
@@ -76,6 +77,25 @@ const LOG_HEADERS = [
   'month',
   'message',
   'payload_json'
+];
+
+const CLASSIFICATION_LOG_HEADERS = [
+  'timestamp',
+  'source',
+  'company_name',
+  'month',
+  'file_name',
+  'file_url',
+  'mime_type',
+  'extension',
+  'doc_key',
+  'display_name',
+  'accepted_extensions',
+  'confidence',
+  'llm_match',
+  'accepted_for_tracker',
+  'reason',
+  'unmatched_reason'
 ];
 
 function onOpen() {
