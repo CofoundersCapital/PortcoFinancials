@@ -430,7 +430,7 @@ function classifyDriveFileForDocs_(file, docs, missingDocs, overrides) {
 
   let extractedText = '';
   try {
-    extractedText = truncate_(extractFileText_(file), CONFIG.OPENAI_CLASSIFICATION_MAX_CHARS);
+    extractedText = extractFileTextForClassification_(file);
   } catch (err) {
     extractedText = '[Text extraction failed: ' + err.message + ']';
   }

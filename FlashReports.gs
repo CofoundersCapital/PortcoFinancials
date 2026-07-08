@@ -111,6 +111,22 @@ function extractFileText_(file) {
   return '[Unsupported file type: ' + file.getName() + ' / ' + mimeType + ']';
 }
 
+function extractFileTextForClassification_(file) {
+  const mimeType = file.getMimeType();
+  const extension = getFileExtension_(file.getName());
+  const maxChars = CONFIG.OPENAI_CLASSIFICATION_MAX_CHARS || CONFIG.MAX_EXTRACTED_CHARS_PER_FILE;
+
+  if (mimeType === MimeType.GOOGLE_SHEETS) {
+    return spreadsheetToCsvTextWithSheetBudget_(file.getId(), maxChars);
+  }
+
+  if (extension === 'xlsx' || extension === 'xls' || mimeType === MimeType.MICROSOFT_EXCEL) {
+    return excelToCsvTextWithSheetBudget_(file, maxChars);
+  }
+
+  return truncate_(extractFileText_(file), maxChars);
+}
+
 function excelToCsvText_(file) {
   const temp = Drive.Files.copy({
     title: 'TEMP converted - ' + file.getName(),
@@ -121,6 +137,21 @@ function excelToCsvText_(file) {
 
   try {
     return spreadsheetToCsvText_(temp.id);
+  } finally {
+    DriveApp.getFileById(temp.id).setTrashed(true);
+  }
+}
+
+function excelToCsvTextWithSheetBudget_(file, maxChars) {
+  const temp = Drive.Files.copy({
+    title: 'TEMP converted - ' + file.getName(),
+    mimeType: MimeType.GOOGLE_SHEETS
+  }, file.getId(), {
+    convert: true
+  });
+
+  try {
+    return spreadsheetToCsvTextWithSheetBudget_(temp.id, maxChars);
   } finally {
     DriveApp.getFileById(temp.id).setTrashed(true);
   }
@@ -137,6 +168,44 @@ function spreadsheetToCsvText_(spreadsheetId) {
       }).join('\n')
     ].join('\n');
   }).join('\n\n');
+}
+
+function spreadsheetToCsvTextWithSheetBudget_(spreadsheetId, maxChars) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  const sheets = ss.getSheets();
+  if (sheets.length === 0) {
+    return '';
+  }
+
+  const separator = '\n\n';
+  const separatorBudget = separator.length * Math.max(0, sheets.length - 1);
+  const availableChars = Math.max(1, Number(maxChars || 0) - separatorBudget);
+  const charsPerSheet = Math.max(1, Math.floor(availableChars / sheets.length));
+
+  return sheets.map(function (sheet) {
+    const values = sheet.getDataRange().getDisplayValues();
+    const section = [
+      '--- SHEET: ' + sheet.getName() + ' ---',
+      values.map(function (row) {
+        return row.map(csvEscape_).join(',');
+      }).join('\n')
+    ].join('\n');
+    return truncateToBudget_(section, charsPerSheet);
+  }).join(separator);
+}
+
+function truncateToBudget_(text, maxChars) {
+  const value = String(text || '');
+  const limit = Math.max(1, Number(maxChars || 0));
+  if (value.length <= limit) {
+    return value;
+  }
+
+  const marker = '\n[TRUNCATED after ' + limit + ' characters]';
+  if (limit <= marker.length) {
+    return value.slice(0, limit);
+  }
+  return value.slice(0, limit - marker.length) + marker;
 }
 
 function pdfToText_(file) {
