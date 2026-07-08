@@ -17,6 +17,7 @@ const CONFIG = {
   OPENAI_MODEL: 'gpt-5.5',
   OPENAI_ENDPOINT: 'https://api.openai.com/v1/responses',
   OPENAI_MAX_OUTPUT_TOKENS: 4096,
+  OPENAI_CLASSIFICATION_MAX_CHARS: 12000,
   FORM_URL: '',
   CFC_TEAM_EMAIL: 'team@cfc.com',
   TIMEZONE: 'America/New_York',

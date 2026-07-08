@@ -24,20 +24,19 @@ function onFormSubmit(e) {
     sendCfcWarningEmail_(beforeRecord, warning);
   }
 
-  docs.forEach(function (doc) {
-    const fileIds = submission.filesByDocKey[doc.doc_key] || [];
-    if (fileIds.length === 0) {
+  const updatedDocKeys = {};
+  const processedDocKeys = [];
+  const submittedFileIds = getSubmittedChecklistFileIds_(submission);
+  submittedFileIds.forEach(function (fileId) {
+    const classification = processSubmittedChecklistFile_(fileId, docs, getMissingDocs_(beforeRecord, docs), sheet, rowNumber, beforeRecord);
+    const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+    if (classification.matchedDocs.length > 0 && matchedDocs.length === 0) {
       return;
     }
-
-    const processedCount = fileIds.filter(function (fileId) {
-      return processUploadedFile_(fileId, targetFolder, doc);
-    }).length;
-
-    if (processedCount > 0) {
-      setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_status', 'received');
-      setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_date', new Date());
+    if (matchedDocs.length > 0 && classification.file) {
+      saveDriveFileForDocs_(classification.file, targetFolder, matchedDocs, true);
     }
+    markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
   });
 
   processSupportingFiles_(submission.supportingFileIds, targetFolder);
@@ -56,7 +55,8 @@ function onFormSubmit(e) {
 
   logEvent_('form_submit_processed', submission.companyName, submission.month, 'Form submission processed', {
     respondentEmail: submission.respondentEmail,
-    uploadedDocKeys: Object.keys(submission.filesByDocKey)
+    uploadedDocKeys: uniqueValues_(processedDocKeys),
+    submittedFileCount: submittedFileIds.length
   });
 }
 
@@ -83,19 +83,18 @@ function driveFolderWatcher() {
     let rowUpdated = false;
 
     listFilesInFolder_(folder).forEach(function (file) {
-      const matchedDocs = classifyDriveFileDocs_(file, docs, missingDocs).filter(function (doc) {
-        return !updatedDocKeys[doc.doc_key];
-      });
+      const classification = classifyDriveFileForDocs_(file, docs, missingDocs);
+      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      if (classification.matchedDocs.length === 0) {
+        recordDocumentClassificationNeedsReview_(sheet, entry.rowNumber, record, 'drive_watcher', file, classification.reason, classification.raw);
+        return;
+      }
       if (matchedDocs.length === 0) {
         return;
       }
 
-      saveDriveFileForDocs_(file, folder, matchedDocs);
-      matchedDocs.forEach(function (doc) {
-        setCellByHeader_(sheet, entry.rowNumber, 'doc_' + doc.doc_key + '_status', 'received');
-        setCellByHeader_(sheet, entry.rowNumber, 'doc_' + doc.doc_key + '_date', new Date());
-        updatedDocKeys[doc.doc_key] = true;
-      });
+      saveDriveFileForDocs_(file, folder, matchedDocs, false);
+      markMatchedDocsReceived_(sheet, entry.rowNumber, matchedDocs, updatedDocKeys, []);
       rowUpdated = true;
     });
 
@@ -178,23 +177,22 @@ function processGmailThread_(thread, sheet, docs) {
     const processedDocKeys = [];
 
     attachments.forEach(function (attachment) {
-      const matchedDocs = classifyEmailAttachmentDocs_(attachment, docs, missingDocs).filter(function (doc) {
-        return !updatedDocKeys[doc.doc_key];
-      });
-      if (matchedDocs.length === 0) {
+      const classification = classifyEmailAttachmentForDocs_(attachment, docs, missingDocs);
+      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      if (classification.matchedDocs.length === 0) {
         unmatchedAttachmentNames.push(attachment.getName());
-        saveSingleEmailAttachmentForReview_(attachment, message, 'Could not classify attachment as a required document.');
+        saveSingleEmailAttachmentForReview_(attachment, message, classification.reason || 'Could not classify attachment as a required document.');
+        return;
+      }
+      if (matchedDocs.length === 0) {
         return;
       }
 
       matchedDocs.forEach(function (doc) {
         saveEmailAttachmentToFolder_(attachment, folder, doc);
-        setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_status', 'received');
-        setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_date', new Date());
-        updatedDocKeys[doc.doc_key] = true;
-        processedDocKeys.push(doc.doc_key);
         result.attachmentsSaved++;
       });
+      markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
       rowUpdated = true;
     });
 
@@ -330,35 +328,36 @@ function extractDriveIds_(response) {
   });
 }
 
-function processUploadedFile_(fileId, targetFolder, doc) {
+function getSubmittedChecklistFileIds_(submission) {
+  const ids = [];
+  Object.keys(submission.filesByDocKey || {}).forEach(function (docKey) {
+    (submission.filesByDocKey[docKey] || []).forEach(function (fileId) {
+      ids.push(fileId);
+    });
+  });
+  return ids.filter(function (id, index) {
+    return id && ids.indexOf(id) === index;
+  });
+}
+
+function processSubmittedChecklistFile_(fileId, docs, missingDocs, sheet, rowNumber, record) {
   let file;
   try {
     file = DriveApp.getFileById(fileId);
   } catch (err) {
     logEvent_('upload_file_link_error', '', '', 'Could not open pasted Drive file link', {
       fileId: fileId,
-      docKey: doc.doc_key,
       error: err.message
     });
-    return false;
+    return buildDocumentClassificationResult_([], 'Could not open pasted Drive file link: ' + err.message, null);
   }
 
-  const extension = getFileExtension_(file.getName()) || extensionFromMimeType_(file.getMimeType()) || splitExtensions_(doc.accepted_extensions)[0] || 'file';
-  const accepted = splitExtensions_(doc.accepted_extensions);
-
-  if (accepted.length > 0 && accepted.indexOf(extension) === -1) {
-    logEvent_('upload_extension_warning', '', '', 'Uploaded file extension did not match config', {
-      fileName: file.getName(),
-      extension: extension,
-      accepted: accepted,
-      docKey: doc.doc_key
-    });
+  const classification = classifyDriveFileForDocs_(file, docs, missingDocs);
+  classification.file = file;
+  if (classification.matchedDocs.length === 0) {
+    recordDocumentClassificationNeedsReview_(sheet, rowNumber, record, 'form_upload', file, classification.reason, classification.raw);
   }
-
-  trashExistingFileNamed_(targetFolder, doc.doc_key + '.' + extension, file.getId());
-  file.setName(doc.doc_key + '.' + extension);
-  moveFileToFolder_(file, targetFolder);
-  return true;
+  return classification;
 }
 
 function processSupportingFiles_(fileIds, targetFolder) {
@@ -392,32 +391,173 @@ function listFilesInFolder_(folder) {
   return files;
 }
 
-function findMatchingDocumentFile_(folder, doc) {
-  const files = folder.getFiles();
-  const acceptedExtensions = splitExtensions_(doc.accepted_extensions);
-  const keyPattern = buildDocFilenamePattern_(doc);
+function classifyDriveFileForDocs_(file, docs, missingDocs, overrides) {
+  const fileName = overrides && overrides.fileName ? overrides.fileName : file.getName();
+  const mimeType = overrides && overrides.mimeType ? overrides.mimeType : file.getMimeType();
+  const extension = getFileExtension_(fileName) || extensionFromMimeType_(mimeType);
+  const candidateDocs = getCandidateDocsForExtension_(docs, extension);
 
-  while (files.hasNext()) {
-    const file = files.next();
-    const extension = getFileExtension_(file.getName()) || extensionFromMimeType_(file.getMimeType());
-    if (acceptedExtensions.length > 0 && acceptedExtensions.indexOf(extension) === -1) {
-      continue;
-    }
-    if (keyPattern.test(file.getName())) {
-      return file;
-    }
+  if (candidateDocs.length === 0) {
+    return buildDocumentClassificationResult_([], 'No required document types accept extension "' + (extension || 'unknown') + '".', null);
   }
 
-  return null;
+  let extractedText = '';
+  try {
+    extractedText = truncate_(extractFileText_(file), CONFIG.OPENAI_CLASSIFICATION_MAX_CHARS);
+  } catch (err) {
+    extractedText = '[Text extraction failed: ' + err.message + ']';
+  }
+
+  let raw;
+  try {
+    raw = openaiClassifyDocument_({
+      fileName: fileName,
+      mimeType: mimeType,
+      extension: extension,
+      candidateDocs: candidateDocs,
+      missingDocs: missingDocs || [],
+      extractedText: extractedText
+    });
+  } catch (err) {
+    return buildDocumentClassificationResult_([], 'LLM document classification failed: ' + err.message, null);
+  }
+
+  return normalizeDocumentClassification_(raw, candidateDocs);
 }
 
-function classifyDriveFileDocs_(file, docs, missingDocs) {
-  return classifyFileForDocs_(file.getName(), file.getMimeType(), docs, missingDocs);
+function classifyEmailAttachmentForDocs_(attachment, docs, missingDocs) {
+  let tempFile = null;
+  try {
+    tempFile = createTemporaryClassificationFile_(attachment);
+    return classifyDriveFileForDocs_(tempFile, docs, missingDocs, {
+      fileName: attachment.getName(),
+      mimeType: attachment.getContentType()
+    });
+  } catch (err) {
+    return buildDocumentClassificationResult_([], 'Could not prepare attachment for LLM classification: ' + err.message, null);
+  } finally {
+    if (tempFile) {
+      try {
+        tempFile.setTrashed(true);
+      } catch (cleanupErr) {
+        logEvent_('classification_temp_cleanup_error', '', '', 'Could not trash temporary classification file', {
+          fileName: tempFile.getName(),
+          error: cleanupErr.message
+        });
+      }
+    }
+  }
 }
 
-function saveDriveFileForDocs_(file, folder, matchedDocs) {
+function createTemporaryClassificationFile_(attachment) {
+  const folder = getTemporaryClassificationFolder_(true);
+  const timestamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMdd-HHmmss');
+  return folder.createFile(attachment.copyBlob()).setName('classify-' + timestamp + '-' + attachment.getName());
+}
+
+function getTemporaryClassificationFolder_(createIfMissing) {
+  const rootFolder = getRootFolder_(createIfMissing);
+  if (!rootFolder) {
+    return null;
+  }
+  return getNamedFolder_(rootFolder, '_classification_temp', createIfMissing);
+}
+
+function getCandidateDocsForExtension_(docs, extension) {
+  return docs.filter(function (doc) {
+    const accepted = splitExtensions_(doc.accepted_extensions);
+    return accepted.length === 0 || accepted.indexOf(extension) >= 0;
+  });
+}
+
+function normalizeDocumentClassification_(raw, candidateDocs) {
+  const docsByKey = {};
+  candidateDocs.forEach(function (doc) {
+    docsByKey[doc.doc_key] = doc;
+  });
+
+  const seen = {};
+  const matches = [];
+  (raw && raw.matches ? raw.matches : []).forEach(function (match) {
+    if (!match
+      || !docsByKey[match.doc_key]
+      || ['high', 'medium'].indexOf(match.confidence) < 0
+      || seen[match.doc_key]) {
+      return;
+    }
+
+    seen[match.doc_key] = true;
+    matches.push(docsByKey[match.doc_key]);
+  });
+
+  const reason = matches.length > 0
+    ? ''
+    : buildDocumentClassificationNoMatchReason_(raw);
+
+  return buildDocumentClassificationResult_(matches, reason, raw);
+}
+
+function buildDocumentClassificationNoMatchReason_(raw) {
+  if (raw && raw.unmatched_reason) {
+    return String(raw.unmatched_reason);
+  }
+
+  const lowConfidence = raw && raw.matches ? raw.matches.filter(function (match) {
+    return match && match.confidence === 'low';
+  }) : [];
+  if (lowConfidence.length > 0) {
+    return 'LLM returned only low-confidence document matches.';
+  }
+
+  return 'LLM returned no high- or medium-confidence required document matches.';
+}
+
+function buildDocumentClassificationResult_(matchedDocs, reason, raw) {
+  return {
+    matchedDocs: matchedDocs || [],
+    reason: reason || '',
+    raw: raw || null
+  };
+}
+
+function filterMatchedDocsForUpdate_(matchedDocs, updatedDocKeys) {
+  return (matchedDocs || []).filter(function (doc) {
+    return !updatedDocKeys[doc.doc_key];
+  });
+}
+
+function markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys) {
+  (matchedDocs || []).forEach(function (doc) {
+    setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_status', 'received');
+    setCellByHeader_(sheet, rowNumber, 'doc_' + doc.doc_key + '_date', new Date());
+    updatedDocKeys[doc.doc_key] = true;
+    if (processedDocKeys) {
+      processedDocKeys.push(doc.doc_key);
+    }
+  });
+}
+
+function recordDocumentClassificationNeedsReview_(sheet, rowNumber, record, source, file, reason, raw) {
+  let fileUrl = '';
+  try {
+    fileUrl = file.getUrl();
+  } catch (err) {
+    fileUrl = '';
+  }
+
+  appendNote_(sheet, rowNumber, 'Document classification needs review (' + source + '): ' + file.getName() + ' - ' + reason);
+  logEvent_('document_classification_needs_review', record.company_name, record.month, 'Document classification needs review', {
+    source: source,
+    fileName: file.getName(),
+    fileUrl: fileUrl,
+    reason: reason,
+    classification: raw
+  });
+}
+
+function saveDriveFileForDocs_(file, folder, matchedDocs, moveSingleFile) {
   if (matchedDocs.length === 1) {
-    renameToCanonical_(file, matchedDocs[0]);
+    renameToCanonical_(file, folder, matchedDocs[0], moveSingleFile);
     return;
   }
 
@@ -437,44 +577,23 @@ function copyDriveFileToCanonical_(file, folder, doc) {
   return file.makeCopy(canonicalName, folder);
 }
 
-function buildDocFilenamePattern_(doc) {
-  let terms = [doc.doc_key].concat(String(doc.display_name || '').split(/[^a-zA-Z0-9]+/));
-  if (doc.doc_key === 'financials') {
-    terms = terms.concat(['financial', 'financials', 'statement', 'income', 'pnl', 'p&l']);
-  }
-  if (doc.doc_key === 'model') {
-    terms = terms.concat(['model']);
-  }
-  if (doc.doc_key === 'forecast') {
-    terms = terms.concat(['forecast', 'budget']);
-  }
-  const unique = terms
-    .map(function (term) {
-      return String(term || '').toLowerCase();
-    })
-    .filter(function (term) {
-      return term.length >= 3;
-    })
-    .filter(function (term, index, list) {
-      return list.indexOf(term) === index;
-    });
-  return new RegExp('(' + unique.map(escapeRegExp_).join('|') + ')', 'i');
-}
-
-function renameToCanonical_(file, doc) {
-  const extension = getFileExtension_(file.getName()) || extensionFromMimeType_(file.getMimeType());
+function renameToCanonical_(file, folder, doc, moveFile) {
+  const extension = getFileExtension_(file.getName()) || extensionFromMimeType_(file.getMimeType()) || splitExtensions_(doc.accepted_extensions)[0] || 'file';
   if (!extension) {
     return;
   }
   const canonicalName = doc.doc_key + '.' + extension;
   if (file.getName() === canonicalName) {
+    if (moveFile) {
+      moveFileToFolder_(file, folder);
+    }
     return;
   }
-  const parents = file.getParents();
-  if (parents.hasNext()) {
-    trashExistingFileNamed_(parents.next(), canonicalName, file.getId());
-  }
+  trashExistingFileNamed_(folder, canonicalName, file.getId());
   file.setName(canonicalName);
+  if (moveFile) {
+    moveFileToFolder_(file, folder);
+  }
 }
 
 function trashExistingFileNamed_(folder, name, exceptFileId) {
@@ -652,75 +771,6 @@ function chooseBestSubmissionRow_(companyRecords) {
   return pool[0];
 }
 
-function classifyEmailAttachmentDocs_(attachment, docs, missingDocs) {
-  return classifyFileForDocs_(attachment.getName(), attachment.getContentType(), docs, missingDocs);
-}
-
-function classifyFileForDocs_(fileName, contentType, docs, missingDocs) {
-  const extension = getFileExtension_(fileName) || extensionFromMimeType_(contentType);
-  const candidateDocs = docs.filter(function (doc) {
-    const accepted = splitExtensions_(doc.accepted_extensions);
-    return accepted.length === 0 || accepted.indexOf(extension) >= 0;
-  });
-
-  if (candidateDocs.length === 0) {
-    return [];
-  }
-
-  const scored = candidateDocs.map(function (doc) {
-    return {
-      doc: doc,
-      score: scoreDocFileMatch_(doc, fileName, missingDocs)
-    };
-  }).sort(function (a, b) {
-    return b.score - a.score;
-  });
-
-  const strongMatches = scored.filter(function (entry) {
-    return entry.score >= 10;
-  });
-
-  if (strongMatches.length > 0) {
-    return strongMatches.map(function (entry) {
-      return entry.doc;
-    });
-  }
-
-  const missingCandidates = candidateDocs.filter(function (doc) {
-    return isDocStillMissing_(doc, missingDocs);
-  });
-  if (missingCandidates.length === 1) {
-    return [missingCandidates[0]];
-  }
-
-  return [];
-}
-
-function scoreDocFileMatch_(doc, fileName, missingDocs) {
-  let score = 0;
-  if (hasStrongDocKeyword_(doc, fileName)) {
-    score += 10;
-  }
-  if (isDocStillMissing_(doc, missingDocs)) {
-    score += 2;
-  }
-  return score;
-}
-
-function hasStrongDocKeyword_(doc, fileName) {
-  const name = String(fileName || '').toLowerCase();
-  if (doc.doc_key === 'financials') {
-    return /\b(financials|monthly financials|financial statements?|income statements?|p&l|pnl|balance sheets?|cash flows?|statement of cash flows?)\b/i.test(name);
-  }
-  if (doc.doc_key === 'model') {
-    return /\b(model|operating model|financial model)\b/i.test(name);
-  }
-  if (doc.doc_key === 'forecast') {
-    return /\b(forecast|budget|plan|projection|projections)\b/i.test(name);
-  }
-  return buildDocFilenamePattern_(doc).test(fileName);
-}
-
 function saveEmailAttachmentToFolder_(attachment, folder, doc) {
   const extension = getFileExtension_(attachment.getName()) || extensionFromMimeType_(attachment.getContentType()) || splitExtensions_(doc.accepted_extensions)[0] || 'file';
   const canonicalName = doc.doc_key + '.' + extension;
@@ -841,12 +891,6 @@ function containsCompanyName_(text, companyName) {
     return false;
   }
   return normalizedText.indexOf(normalizedCompany) >= 0;
-}
-
-function isDocStillMissing_(doc, missingDocs) {
-  return missingDocs.some(function (missingDoc) {
-    return missingDoc.doc_key === doc.doc_key;
-  });
 }
 
 function uniqueValues_(values) {

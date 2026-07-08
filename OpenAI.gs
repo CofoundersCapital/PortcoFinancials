@@ -1,9 +1,4 @@
 function openaiExtract(prompt) {
-  const apiKey = getScriptProperty_(PROPERTY_KEYS.OPENAI_API_KEY);
-  if (!apiKey) {
-    throw new Error('Missing OPENAI_API_KEY script property. Set it in Apps Script Project Settings before generating flash reports.');
-  }
-
   const payload = {
     model: CONFIG.OPENAI_MODEL,
     instructions: 'Extract portfolio company financial metrics from messy source text. Use null when a value cannot be determined confidently. Do not guess.',
@@ -31,6 +26,59 @@ function openaiExtract(prompt) {
     }
   };
 
+  return fetchOpenAIJson_(payload, 'Missing OPENAI_API_KEY script property. Set it in Apps Script Project Settings before generating flash reports.');
+}
+
+function openaiClassifyDocument_(classificationInput) {
+  const candidateDocs = classificationInput.candidateDocs || [];
+  if (candidateDocs.length === 0) {
+    return {
+      matches: [],
+      unmatched_reason: 'No configured required document types accept this file extension.'
+    };
+  }
+
+  const payload = {
+    model: CONFIG.OPENAI_MODEL,
+    instructions: [
+      'Classify portfolio company monthly reporting documents.',
+      'Return every required document type that is clearly present in the file.',
+      'A single file can satisfy multiple document types, such as financials, model, and forecast in different spreadsheet tabs.',
+      'Use only the provided doc_key values. Use no matches when evidence is weak or ambiguous.'
+    ].join(' '),
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: buildDocumentClassificationPrompt_(classificationInput)
+          }
+        ]
+      }
+    ],
+    max_output_tokens: 1024,
+    store: false,
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'document_classification',
+        description: 'Required monthly reporting document type classification.',
+        strict: true,
+        schema: getDocumentClassificationSchema_(candidateDocs)
+      }
+    }
+  };
+
+  return fetchOpenAIJson_(payload, 'Missing OPENAI_API_KEY script property. Set it in Apps Script Project Settings before classifying uploads.');
+}
+
+function fetchOpenAIJson_(payload, missingApiKeyMessage) {
+  const apiKey = getScriptProperty_(PROPERTY_KEYS.OPENAI_API_KEY);
+  if (!apiKey) {
+    throw new Error(missingApiKeyMessage);
+  }
+
   const response = UrlFetchApp.fetch(CONFIG.OPENAI_ENDPOINT, {
     method: 'post',
     contentType: 'application/json',
@@ -56,6 +104,59 @@ function openaiExtract(prompt) {
   return JSON.parse(answer);
 }
 
+function buildDocumentClassificationPrompt_(classificationInput) {
+  const candidateDocs = classificationInput.candidateDocs || [];
+  const missingDocs = classificationInput.missingDocs || [];
+  const missingDocKeys = missingDocs.map(function (doc) {
+    return doc.doc_key;
+  });
+  const docsText = candidateDocs.map(function (doc) {
+    return [
+      '- doc_key: ' + doc.doc_key,
+      '  display_name: ' + doc.display_name,
+      '  accepted_extensions: ' + (doc.accepted_extensions || 'any'),
+      '  current_status: ' + (missingDocKeys.indexOf(doc.doc_key) >= 0 ? 'missing' : 'already_received'),
+      '  guidance: ' + getDocumentClassificationGuidance_(doc)
+    ].join('\n');
+  }).join('\n');
+
+  return [
+    'Classify this received file against the configured required document checklist.',
+    '',
+    'Rules:',
+    '- Return all matching doc_key values that are clearly present.',
+    '- Return multiple matches when one spreadsheet/workbook/PDF contains multiple required materials.',
+    '- Return an empty matches array if the file is supporting material, ambiguous, or not one of the candidate required documents.',
+    '- Do not infer a match only because a document is still missing.',
+    '',
+    'File metadata:',
+    'filename: ' + (classificationInput.fileName || ''),
+    'mime_type: ' + (classificationInput.mimeType || ''),
+    'extension: ' + (classificationInput.extension || ''),
+    '',
+    'Candidate required docs:',
+    docsText || '[none]',
+    '',
+    'Missing docs before this upload: ' + (missingDocKeys.join(', ') || '[none]'),
+    '',
+    'Extracted text preview:',
+    classificationInput.extractedText || '[No text could be extracted.]'
+  ].join('\n');
+}
+
+function getDocumentClassificationGuidance_(doc) {
+  if (doc.doc_key === 'financials') {
+    return 'Historical financial statements such as P&L, income statement, balance sheet, cash flow statement, monthly actuals, or financial statement package.';
+  }
+  if (doc.doc_key === 'model') {
+    return 'Operating or financial model with assumptions, drivers, scenario logic, runway model, or multi-period business model tabs.';
+  }
+  if (doc.doc_key === 'forecast') {
+    return 'Forecast, budget, plan, projections, budget-vs-actual update, or forward-looking financial update.';
+  }
+  return 'Use the display name and checklist context to decide whether this required material is present.';
+}
+
 function getOpenAIResponseText_(response) {
   if (response.output_text) {
     return String(response.output_text).trim();
@@ -73,6 +174,40 @@ function getOpenAIResponseText_(response) {
   }
 
   return '';
+}
+
+function getDocumentClassificationSchema_(candidateDocs) {
+  const docKeys = candidateDocs.map(function (doc) {
+    return doc.doc_key;
+  });
+
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['matches', 'unmatched_reason'],
+    properties: {
+      matches: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['doc_key', 'confidence', 'reason'],
+          properties: {
+            doc_key: {
+              type: 'string',
+              enum: docKeys
+            },
+            confidence: {
+              type: 'string',
+              enum: ['high', 'medium', 'low']
+            },
+            reason: { type: 'string' }
+          }
+        }
+      },
+      unmatched_reason: { type: ['string', 'null'] }
+    }
+  };
 }
 
 function getFlashReportExtractionSchema_() {
