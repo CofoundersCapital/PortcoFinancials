@@ -25,5 +25,3 @@ Email intake:
 Google Forms are now optional. Google Forms can contain file upload questions, but Google's APIs do not currently support creating those questions programmatically. The generated form therefore asks CEOs to upload files into their shared Drive folder and paste Drive file links into the form. The `driveFolderWatcher()` trigger also marks files received when they are dropped directly into the company/month folder.
 
 Document classification and flash report generation use the OpenAI Responses API. The default model is configured in `Code.gs` as `OPENAI_MODEL`.
-
-Still need to test - waiting for my CFC account 2FA to be fixed. 
