@@ -16,7 +16,7 @@ Email intake:
 - The Apps Script must run as the Google account that owns or receives mail for the dedicated inbox.
 - CEOs should send attachments to the dedicated inbox with the company and reporting month in the subject, for example `Acme Corp May 2026 financials`.
 - `gmailInboxWatcher()` searches for unprocessed attachment emails, matches the sender/subject to a tracker row, uses the OpenAI Responses API to classify each attachment, saves recognized attachments into `Portfolio Reporting/<Company>/<YYYY-MM>/`, and marks matching required docs as `received`.
-- A single file can satisfy multiple required docs when the LLM finds multiple materials in it, for example a workbook with financials, model, and forecast tabs can mark all three docs received.
+- A single file can satisfy multiple required docs when the LLM finds multiple materials in it, for example a workbook with financials, model, and forecast tabs can mark all three docs received. Multi-type files are stored once with a composite name such as `financials_forecast_model.xlsx`.
 - Emails that cannot be matched or classified are labeled `CFC_Reporting_Needs_Review`, and attachments are saved in `_email_needs_review`.
 - Successfully processed threads are labeled `CFC_Reporting_Processed`.
 - Each LLM classification writes per-document-type audit rows to the `Document Classification Log` sheet, including confidence, reasoning, whether the LLM matched the type, and whether the pipeline accepted that type for the tracker.

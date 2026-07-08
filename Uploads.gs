@@ -203,10 +203,8 @@ function processGmailThread_(thread, sheet, docs) {
         return;
       }
 
-      matchedDocs.forEach(function (doc) {
-        saveEmailAttachmentToFolder_(attachment, folder, doc);
-        result.attachmentsSaved++;
-      });
+      saveEmailAttachmentToFolder_(attachment, folder, matchedDocs);
+      result.attachmentsSaved++;
       markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
       rowUpdated = true;
     });
@@ -740,20 +738,23 @@ function saveDriveFileForDocs_(file, folder, matchedDocs, moveSingleFile) {
     return;
   }
 
-  matchedDocs.forEach(function (doc) {
-    copyDriveFileToCanonical_(file, folder, doc);
-  });
+  renameToCompositeCanonical_(file, folder, matchedDocs, moveSingleFile);
 }
 
-function copyDriveFileToCanonical_(file, folder, doc) {
-  const extension = getFileExtension_(file.getName()) || extensionFromMimeType_(file.getMimeType()) || splitExtensions_(doc.accepted_extensions)[0] || 'file';
-  const canonicalName = doc.doc_key + '.' + extension;
+function renameToCompositeCanonical_(file, folder, matchedDocs, moveFile) {
+  const canonicalName = buildCanonicalNameForDocs_(file.getName(), file.getMimeType(), matchedDocs);
   if (file.getName() === canonicalName) {
-    return file;
+    if (moveFile) {
+      moveFileToFolder_(file, folder);
+    }
+    return;
   }
 
   trashExistingFileNamed_(folder, canonicalName, file.getId());
-  return file.makeCopy(canonicalName, folder);
+  file.setName(canonicalName);
+  if (moveFile) {
+    moveFileToFolder_(file, folder);
+  }
 }
 
 function renameToCanonical_(file, folder, doc, moveFile) {
@@ -773,6 +774,27 @@ function renameToCanonical_(file, folder, doc, moveFile) {
   if (moveFile) {
     moveFileToFolder_(file, folder);
   }
+}
+
+function buildCanonicalNameForDocs_(fileName, mimeType, docs) {
+  const extension = getFileExtension_(fileName) || extensionFromMimeType_(mimeType) || getFirstAcceptedExtension_(docs) || 'file';
+  const key = docs
+    .map(function (doc) {
+      return doc.doc_key;
+    })
+    .sort()
+    .join('_');
+  return key + '.' + extension;
+}
+
+function getFirstAcceptedExtension_(docs) {
+  for (let i = 0; i < docs.length; i++) {
+    const accepted = splitExtensions_(docs[i].accepted_extensions);
+    if (accepted.length > 0) {
+      return accepted[0];
+    }
+  }
+  return '';
 }
 
 function trashExistingFileNamed_(folder, name, exceptFileId) {
@@ -950,9 +972,9 @@ function chooseBestSubmissionRow_(companyRecords) {
   return pool[0];
 }
 
-function saveEmailAttachmentToFolder_(attachment, folder, doc) {
-  const extension = getFileExtension_(attachment.getName()) || extensionFromMimeType_(attachment.getContentType()) || splitExtensions_(doc.accepted_extensions)[0] || 'file';
-  const canonicalName = doc.doc_key + '.' + extension;
+function saveEmailAttachmentToFolder_(attachment, folder, matchedDocs) {
+  const docs = matchedDocs || [];
+  const canonicalName = buildCanonicalNameForDocs_(attachment.getName(), attachment.getContentType(), docs);
   trashExistingFileNamed_(folder, canonicalName, '');
   const file = folder.createFile(attachment.copyBlob()).setName(canonicalName);
   return file;
