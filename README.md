@@ -24,4 +24,6 @@ Email intake:
 
 Google Forms are now optional. Google Forms can contain file upload questions, but Google's APIs do not currently support creating those questions programmatically. The generated form therefore asks CEOs to upload files into their shared Drive folder and paste Drive file links into the form. The `driveFolderWatcher()` trigger also marks files received when they are dropped directly into the company/month folder.
 
+The `deadline` column in the Submissions sheet is editable. New rows default it from the reporting month, and changing it recalculates `days_overdue` while resetting reminder/escalation timing for incomplete rows. Use `CFC Reporting -> Refresh tracker columns/formulas` to apply deadline validation and backfill missing deadlines on an existing tracker.
+
 Document classification and flash report generation use the OpenAI Responses API. The default model is configured in `Code.gs` as `OPENAI_MODEL`.

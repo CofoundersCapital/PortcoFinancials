@@ -222,9 +222,30 @@ function setupSubmissionsSheet_(ss) {
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#e8f0fe');
   sheet.getRange(1, 1, sheet.getMaxRows(), headers.length).createFilter();
   applyStatusValidation_(sheet, docs);
+  applyDeadlineValidation_(sheet, headers);
   applyTrackerNumberFormats_(sheet, headers);
   applyConditionalFormatting_(sheet, docs);
   sheet.autoResizeColumns(1, headers.length);
+}
+
+function refreshSubmissionTrackerLayout() {
+  const sheet = getTrackerSheet_();
+  const docs = getRequiredDocs_();
+  ensureTrackerColumns_(sheet, docs);
+  const headers = getHeaders_(sheet);
+
+  backfillMissingDeadlines_(sheet, headers);
+  applyStatusValidation_(sheet, docs);
+  applyDeadlineValidation_(sheet, headers);
+  applyTrackerNumberFormats_(sheet, headers);
+  applyConditionalFormatting_(sheet);
+
+  for (let row = 2; row <= sheet.getLastRow(); row++) {
+    applySubmissionFormulas_(sheet, row, docs);
+  }
+
+  sheet.autoResizeColumns(1, headers.length);
+  SpreadsheetApp.getUi().alert('Tracker columns, deadline validation, and formulas refreshed.');
 }
 
 function setupLogsSheet_(ss) {
@@ -307,6 +328,9 @@ function appendSubmissionRow_(sheet, docs, rowData) {
   const values = headers.map(function (header) {
     if (rowData.hasOwnProperty(header)) {
       return rowData[header];
+    }
+    if (header === 'deadline' && isValidMonth_(rowData.month)) {
+      return getDeadlineForReportingMonth_(rowData.month);
     }
     if (header.indexOf('doc_') === 0 && header.slice(-7) === '_status') {
       return 'missing';

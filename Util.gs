@@ -110,6 +110,8 @@ function ensureTrackerColumns_(sheet, docs) {
       sheet.getRange(1, sheet.getLastColumn()).setValue(header);
     }
   });
+
+  backfillMissingDeadlines_(sheet, getHeaders_(sheet));
 }
 
 function getHeaders_(sheet) {
@@ -165,7 +167,7 @@ function buildAllCompleteFormula_(rowNumber, docs, headers) {
 function buildDaysOverdueFormula_(rowNumber, headers) {
   const allCompleteCol = columnToLetter_(headers.indexOf('all_complete') + 1);
   const deadlineCol = columnToLetter_(headers.indexOf('deadline') + 1);
-  return '=IF(' + allCompleteCol + rowNumber + ',0,MAX(0,TODAY()-' + deadlineCol + rowNumber + '))';
+  return '=IF(OR(' + allCompleteCol + rowNumber + ',' + deadlineCol + rowNumber + '=""),0,MAX(0,TODAY()-' + deadlineCol + rowNumber + '))';
 }
 
 function applyStatusValidation_(sheet, docs) {
@@ -181,6 +183,25 @@ function applyStatusValidation_(sheet, docs) {
       sheet.getRange(2, col, sheet.getMaxRows() - 1, 1).setDataValidation(validation);
     }
   });
+}
+
+function applyDeadlineValidation_(sheet, headers) {
+  const deadlineCol = headers.indexOf('deadline') + 1;
+  if (deadlineCol <= 0) {
+    return;
+  }
+
+  const validation = SpreadsheetApp.newDataValidation()
+    .requireDate()
+    .setAllowInvalid(false)
+    .setHelpText('Use a real date. Editing this deadline resets reminders and escalation timing for incomplete submissions.')
+    .build();
+  sheet.getRange(2, deadlineCol, sheet.getMaxRows() - 1, 1)
+    .setDataValidation(validation)
+    .setNumberFormat('yyyy-mm-dd');
+  sheet.getRange(1, deadlineCol)
+    .setNote('Editable submission deadline. Defaults from the reporting month; changing it recalculates days overdue and resets reminder/escalation timing for incomplete rows.')
+    .setBackground('#fff2cc');
 }
 
 function applyTrackerNumberFormats_(sheet, headers) {
@@ -211,6 +232,75 @@ function applyTrackerNumberFormats_(sheet, headers) {
   }
   if (reminderCountCol > 0) {
     sheet.getRange(2, reminderCountCol, sheet.getMaxRows() - 1, 1).setNumberFormat('0');
+  }
+}
+
+function handleSubmissionTrackerEdit_(e) {
+  if (!e || !e.range) {
+    return;
+  }
+
+  const range = e.range;
+  const sheet = range.getSheet();
+  if (sheet.getName() !== CONFIG.TRACKER_SHEET_NAME || range.getRow() < 2) {
+    return;
+  }
+
+  const headers = getHeaders_(sheet);
+  const deadlineCol = headers.indexOf('deadline') + 1;
+  if (deadlineCol <= 0 || deadlineCol < range.getColumn() || deadlineCol > range.getLastColumn()) {
+    return;
+  }
+
+  const docs = getRequiredDocs_();
+  const firstRow = Math.max(2, range.getRow());
+  const lastRow = range.getLastRow();
+  for (let row = firstRow; row <= lastRow; row++) {
+    applySubmissionFormulas_(sheet, row, docs);
+    const record = getRecordAtRow_(sheet, row);
+    if (!isRecordComplete_(record, docs)) {
+      resetReminderScheduleForRow_(sheet, row);
+    }
+  }
+}
+
+function resetReminderScheduleForRow_(sheet, rowNumber) {
+  const headers = getHeaders_(sheet);
+  const values = {
+    reminder_count: 0,
+    last_reminder_at: '',
+    escalated_at: ''
+  };
+
+  Object.keys(values).forEach(function (header) {
+    if (headers.indexOf(header) >= 0) {
+      setCellByHeader_(sheet, rowNumber, header, values[header]);
+    }
+  });
+}
+
+function backfillMissingDeadlines_(sheet, headers) {
+  const monthCol = headers.indexOf('month') + 1;
+  const deadlineCol = headers.indexOf('deadline') + 1;
+  if (monthCol <= 0 || deadlineCol <= 0 || sheet.getLastRow() < 2) {
+    return;
+  }
+
+  const rowCount = sheet.getLastRow() - 1;
+  const months = sheet.getRange(2, monthCol, rowCount, 1).getValues();
+  const deadlines = sheet.getRange(2, deadlineCol, rowCount, 1).getValues();
+  let changed = false;
+
+  for (let i = 0; i < rowCount; i++) {
+    const month = String(months[i][0] || '').trim();
+    if (!deadlines[i][0] && isValidMonth_(month)) {
+      deadlines[i][0] = getDeadlineForReportingMonth_(month);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    sheet.getRange(2, deadlineCol, rowCount, 1).setValues(deadlines);
   }
 }
 
@@ -439,6 +529,9 @@ function calculateDaysOverdue_(deadline, now) {
     return 0;
   }
   const deadlineDate = asDate_(deadline);
+  if (isNaN(deadlineDate.getTime())) {
+    return 0;
+  }
   const currentDate = now ? asDate_(now) : new Date();
   const startCurrent = startOfDay_(currentDate);
   const startDeadline = startOfDay_(deadlineDate);

@@ -15,7 +15,7 @@ const CONFIG = {
   REMINDER_INTERVAL_DAYS: 3,
   ESCALATION_THRESHOLD_DAYS: 10,
   REESCALATION_INTERVAL_DAYS: 7,
-  OPENAI_MODEL: 'gpt-5.5',
+  OPENAI_MODEL: 'gpt-5.4-nano',
   OPENAI_ENDPOINT: 'https://api.openai.com/v1/responses',
   OPENAI_MAX_OUTPUT_TOKENS: 4096,
   OPENAI_CLASSIFICATION_MAX_CHARS: 12000,
@@ -102,6 +102,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('CFC Reporting')
     .addItem('Run setup', 'setupTracker')
+    .addItem('Refresh tracker columns/formulas', 'refreshSubmissionTrackerLayout')
     .addItem('Create/update upload form', 'setupUploadForm')
     .addItem('Install triggers', 'installTriggers')
     .addSeparator()
@@ -112,6 +113,10 @@ function onOpen() {
     .addItem('Run email inbox watcher now', 'gmailInboxWatcher')
     .addItem('Run Drive folder watcher now', 'driveFolderWatcher')
     .addToUi();
+}
+
+function onEdit(e) {
+  handleSubmissionTrackerEdit_(e);
 }
 
 function installTriggers() {
