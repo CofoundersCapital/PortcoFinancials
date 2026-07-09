@@ -1,16 +1,19 @@
 function onFormSubmit(e) {
   const submission = parseFormSubmission_(e);
+  if (!isFeatureEnabled_('FORM_INTAKE_ENABLED')) {
+    logEvent_('form_submit_skipped', submission.companyName, submission.month, 'Form intake is disabled in Master Config', {
+      respondentEmail: submission.respondentEmail
+    });
+    return;
+  }
+
   const sheet = getTrackerSheet_();
   const docs = getRequiredDocs_();
   const rowNumber = findSubmissionRow_(submission.companyName, submission.month);
 
   if (rowNumber < 0) {
     logEvent_('form_submit_unmatched', submission.companyName, submission.month, 'No tracker row found for form submission', submission);
-    GmailApp.sendEmail(
-      CONFIG.CFC_TEAM_EMAIL,
-      '[CFC] Unmatched monthly financial upload',
-      'A form submission could not be matched to a tracker row.\n\n' + safeJsonStringify_(submission)
-    );
+    sendUnmatchedFormSubmissionEmail_(submission);
     return;
   }
 
@@ -29,7 +32,7 @@ function onFormSubmit(e) {
   const submittedFileIds = getSubmittedChecklistFileIds_(submission);
   submittedFileIds.forEach(function (fileId) {
     const classification = processSubmittedChecklistFile_(fileId, docs, getMissingDocs_(beforeRecord, docs), sheet, rowNumber, beforeRecord);
-    const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+    const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys, beforeRecord);
     logDocumentClassificationAudit_(classification, {
       source: 'form_upload',
       companyName: submission.companyName,
@@ -42,6 +45,7 @@ function onFormSubmit(e) {
       saveDriveFileForDocs_(classification.file, targetFolder, matchedDocs, true);
     }
     markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
+    sendDocumentReceivedNotifications_(beforeRecord, matchedDocs, 'form_upload', classification.fileName || (classification.file ? classification.file.getName() : ''));
   });
 
   processSupportingFiles_(submission.supportingFileIds, targetFolder);
@@ -55,7 +59,7 @@ function onFormSubmit(e) {
 
   const afterRecord = getRecordAtRow_(sheet, rowNumber);
   if (!wasComplete && isRecordComplete_(afterRecord, docs)) {
-    sendCompletionEmail_(afterRecord);
+    handleSubmissionComplete_(afterRecord);
   }
 
   logEvent_('form_submit_processed', submission.companyName, submission.month, 'Form submission processed', {
@@ -66,6 +70,11 @@ function onFormSubmit(e) {
 }
 
 function driveFolderWatcher() {
+  if (!isFeatureEnabled_('DRIVE_WATCHER_ENABLED')) {
+    logEvent_('drive_watcher_skipped', '', '', 'Drive folder watcher is disabled in Master Config', {});
+    return;
+  }
+
   const sheet = getTrackerSheet_();
   const docs = getRequiredDocs_();
   const records = getRecords_(sheet);
@@ -89,7 +98,7 @@ function driveFolderWatcher() {
 
     listFilesInFolder_(folder).forEach(function (file) {
       const classification = classifyDriveFileForDocs_(file, docs, missingDocs);
-      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys, record);
       logDocumentClassificationAudit_(classification, {
         source: 'drive_watcher',
         companyName: record.company_name,
@@ -105,6 +114,7 @@ function driveFolderWatcher() {
 
       saveDriveFileForDocs_(file, folder, matchedDocs, false);
       markMatchedDocsReceived_(sheet, entry.rowNumber, matchedDocs, updatedDocKeys, []);
+      sendDocumentReceivedNotifications_(record, matchedDocs, 'drive_watcher', classification.fileName || file.getName());
       rowUpdated = true;
     });
 
@@ -113,7 +123,7 @@ function driveFolderWatcher() {
       updatedRows++;
       const afterRecord = getRecordAtRow_(sheet, entry.rowNumber);
       if (!wasComplete && isRecordComplete_(afterRecord, docs)) {
-        sendCompletionEmail_(afterRecord);
+        handleSubmissionComplete_(afterRecord);
       }
       logEvent_('drive_watcher_updated_row', record.company_name, record.month, 'Drive watcher marked one or more documents received', {});
     }
@@ -123,12 +133,17 @@ function driveFolderWatcher() {
 }
 
 function gmailInboxWatcher() {
+  if (!isFeatureEnabled_('EMAIL_INTAKE_ENABLED')) {
+    logEvent_('gmail_inbox_watcher_skipped', '', '', 'Email intake is disabled in Master Config', {});
+    return;
+  }
+
   const sheet = getTrackerSheet_();
   const docs = getRequiredDocs_();
-  const processedLabel = getOrCreateGmailLabel_(CONFIG.GMAIL_PROCESSED_LABEL);
-  const needsReviewLabel = getOrCreateGmailLabel_(CONFIG.GMAIL_NEEDS_REVIEW_LABEL);
+  const processedLabel = getOrCreateGmailLabel_(getConfigString_('GMAIL_PROCESSED_LABEL'));
+  const needsReviewLabel = getOrCreateGmailLabel_(getConfigString_('GMAIL_NEEDS_REVIEW_LABEL'));
   const query = buildGmailIntakeQuery_();
-  const threads = GmailApp.search(query, 0, CONFIG.GMAIL_SEARCH_BATCH_SIZE);
+  const threads = GmailApp.search(query, 0, getConfigInteger_('GMAIL_SEARCH_BATCH_SIZE'));
   let processedThreads = 0;
   let reviewThreads = 0;
   let attachmentsSaved = 0;
@@ -188,7 +203,7 @@ function processGmailThread_(thread, sheet, docs) {
 
     attachments.forEach(function (attachment) {
       const classification = classifyEmailAttachmentForDocs_(attachment, docs, missingDocs);
-      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys);
+      const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys, record);
       logDocumentClassificationAudit_(classification, {
         source: 'gmail_attachment',
         companyName: record.company_name,
@@ -197,6 +212,7 @@ function processGmailThread_(thread, sheet, docs) {
       if (classification.matchedDocs.length === 0) {
         unmatchedAttachmentNames.push(attachment.getName());
         saveSingleEmailAttachmentForReview_(attachment, message, classification.reason || 'Could not classify attachment as a required document.');
+        sendClassificationNeedsReviewEmail_(record, 'gmail_attachment', attachment.getName(), '', classification.reason || 'Could not classify attachment as a required document.');
         return;
       }
       if (matchedDocs.length === 0) {
@@ -206,6 +222,7 @@ function processGmailThread_(thread, sheet, docs) {
       saveEmailAttachmentToFolder_(attachment, folder, matchedDocs);
       result.attachmentsSaved++;
       markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
+      sendDocumentReceivedNotifications_(record, matchedDocs, 'gmail_attachment', classification.fileName || attachment.getName());
       rowUpdated = true;
     });
 
@@ -215,7 +232,7 @@ function processGmailThread_(thread, sheet, docs) {
       const afterRecord = getRecordAtRow_(sheet, rowNumber);
       appendNote_(sheet, rowNumber, 'Processed emailed attachments from ' + getEmailAddressFromHeader_(message.getFrom()) + ' for docs [' + uniqueValues_(processedDocKeys).join(', ') + ']: ' + message.getSubject());
       if (!wasComplete && isRecordComplete_(afterRecord, docs)) {
-        sendCompletionEmail_(afterRecord);
+        handleSubmissionComplete_(afterRecord);
       }
     }
 
@@ -387,7 +404,7 @@ function processSupportingFiles_(fileIds, targetFolder) {
     }
 
     const extension = getFileExtension_(file.getName());
-    const timestamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMdd-HHmmss');
+    const timestamp = Utilities.formatDate(new Date(), getConfigString_('TIMEZONE'), 'yyyyMMdd-HHmmss');
     const name = 'supporting-' + timestamp + '-' + (index + 1) + (extension ? '.' + extension : '');
     trashExistingFileNamed_(targetFolder, name, file.getId());
     file.setName(name);
@@ -484,7 +501,7 @@ function classifyEmailAttachmentForDocs_(attachment, docs, missingDocs) {
 
 function createTemporaryClassificationFile_(attachment) {
   const folder = getTemporaryClassificationFolder_(true);
-  const timestamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMdd-HHmmss');
+  const timestamp = Utilities.formatDate(new Date(), getConfigString_('TIMEZONE'), 'yyyyMMdd-HHmmss');
   return folder.createFile(attachment.copyBlob()).setName('classify-' + timestamp + '-' + attachment.getName());
 }
 
@@ -697,9 +714,15 @@ function logDocumentClassificationAudit_(classification, context, acceptedDocs) 
   }
 }
 
-function filterMatchedDocsForUpdate_(matchedDocs, updatedDocKeys) {
+function filterMatchedDocsForUpdate_(matchedDocs, updatedDocKeys, record) {
   return (matchedDocs || []).filter(function (doc) {
-    return !updatedDocKeys[doc.doc_key];
+    if (updatedDocKeys[doc.doc_key]) {
+      return false;
+    }
+    if (record && String(record['doc_' + doc.doc_key + '_status'] || '').toLowerCase() === 'received') {
+      return false;
+    }
+    return true;
   });
 }
 
@@ -723,6 +746,7 @@ function recordDocumentClassificationNeedsReview_(sheet, rowNumber, record, sour
   }
 
   appendNote_(sheet, rowNumber, 'Document classification needs review (' + source + '): ' + file.getName() + ' - ' + reason);
+  sendClassificationNeedsReviewEmail_(record, source, file.getName(), fileUrl, reason);
   logEvent_('document_classification_needs_review', record.company_name, record.month, 'Document classification needs review', {
     source: source,
     fileName: file.getName(),
@@ -818,25 +842,27 @@ function extensionFromMimeType_(mimeType) {
 }
 
 function setupEmailIntake_() {
-  getOrCreateGmailLabel_(CONFIG.GMAIL_PROCESSED_LABEL);
-  getOrCreateGmailLabel_(CONFIG.GMAIL_NEEDS_REVIEW_LABEL);
+  getOrCreateGmailLabel_(getConfigString_('GMAIL_PROCESSED_LABEL'));
+  getOrCreateGmailLabel_(getConfigString_('GMAIL_NEEDS_REVIEW_LABEL'));
   logEvent_('email_intake_setup', '', '', 'Email intake labels checked', {
-    intakeEmail: CONFIG.INTAKE_EMAIL,
-    processedLabel: CONFIG.GMAIL_PROCESSED_LABEL,
-    needsReviewLabel: CONFIG.GMAIL_NEEDS_REVIEW_LABEL
+    intakeEmail: getConfigString_('INTAKE_EMAIL'),
+    processedLabel: getConfigString_('GMAIL_PROCESSED_LABEL'),
+    needsReviewLabel: getConfigString_('GMAIL_NEEDS_REVIEW_LABEL')
   });
 }
 
 function buildGmailIntakeQuery_() {
   const parts = ['has:attachment'];
-  if (CONFIG.INTAKE_EMAIL) {
-    parts.push('to:' + CONFIG.INTAKE_EMAIL);
+  const intakeEmail = getConfigString_('INTAKE_EMAIL');
+  const lookbackDays = getConfigInteger_('GMAIL_LOOKBACK_DAYS');
+  if (intakeEmail) {
+    parts.push('to:' + intakeEmail);
   }
-  if (CONFIG.GMAIL_LOOKBACK_DAYS) {
-    parts.push('newer_than:' + CONFIG.GMAIL_LOOKBACK_DAYS + 'd');
+  if (lookbackDays) {
+    parts.push('newer_than:' + lookbackDays + 'd');
   }
-  parts.push('-label:' + CONFIG.GMAIL_PROCESSED_LABEL);
-  parts.push('-label:' + CONFIG.GMAIL_NEEDS_REVIEW_LABEL);
+  parts.push('-label:' + getConfigString_('GMAIL_PROCESSED_LABEL'));
+  parts.push('-label:' + getConfigString_('GMAIL_NEEDS_REVIEW_LABEL'));
   return parts.join(' ');
 }
 
@@ -988,7 +1014,7 @@ function saveEmailAttachmentsForReview_(attachments, message, reason) {
 
 function saveSingleEmailAttachmentForReview_(attachment, message, reason) {
   const folder = getEmailNeedsReviewFolder_(true);
-  const dateStamp = Utilities.formatDate(message.getDate(), CONFIG.TIMEZONE, 'yyyyMMdd-HHmmss');
+  const dateStamp = Utilities.formatDate(message.getDate(), getConfigString_('TIMEZONE'), 'yyyyMMdd-HHmmss');
   const safeSubject = String(message.getSubject() || 'no-subject').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 80);
   const fileName = dateStamp + '-' + safeSubject + '-' + attachment.getName();
   folder.createFile(attachment.copyBlob()).setName(fileName);
@@ -1027,8 +1053,8 @@ function inferReportingMonthFromText_(text, messageDate) {
   }
 
   const emailDate = messageDate || new Date();
-  let year = monthMatch[2] ? Number(monthMatch[2]) : Number(Utilities.formatDate(emailDate, CONFIG.TIMEZONE, 'yyyy'));
-  const emailMonth = Number(Utilities.formatDate(emailDate, CONFIG.TIMEZONE, 'M'));
+  let year = monthMatch[2] ? Number(monthMatch[2]) : Number(Utilities.formatDate(emailDate, getConfigString_('TIMEZONE'), 'yyyy'));
+  const emailMonth = Number(Utilities.formatDate(emailDate, getConfigString_('TIMEZONE'), 'M'));
   if (!monthMatch[2] && monthNumber > emailMonth + 1) {
     year--;
   }

@@ -1,4 +1,8 @@
 function generateFlashReport(companyName, month) {
+  if (!isFeatureEnabled_('FLASH_REPORT_GENERATION_ENABLED')) {
+    throw new Error('Flash report generation is disabled in Master Config.');
+  }
+
   if (!companyName || !isValidMonth_(month)) {
     throw new Error('Usage: generateFlashReport(companyName, month). Month must use YYYY-MM.');
   }
@@ -41,8 +45,8 @@ function generateFlashReport(companyName, month) {
 
 function generateFlashReportForActiveRow() {
   const sheet = SpreadsheetApp.getActiveSheet();
-  if (sheet.getName() !== CONFIG.TRACKER_SHEET_NAME) {
-    SpreadsheetApp.getUi().alert('Select a row in the ' + CONFIG.TRACKER_SHEET_NAME + ' sheet first.');
+  if (sheet.getName() !== getConfigString_('TRACKER_SHEET_NAME')) {
+    SpreadsheetApp.getUi().alert('Select a row in the ' + getConfigString_('TRACKER_SHEET_NAME') + ' sheet first.');
     return;
   }
 
@@ -53,8 +57,40 @@ function generateFlashReportForActiveRow() {
   }
 
   const record = getRecordAtRow_(sheet, row);
-  const url = generateFlashReport(record.company_name, record.month);
-  SpreadsheetApp.getUi().alert('Draft flash report created:\n\n' + url);
+  try {
+    const url = generateFlashReport(record.company_name, record.month);
+    SpreadsheetApp.getUi().alert('Draft flash report created:\n\n' + url);
+  } catch (err) {
+    SpreadsheetApp.getUi().alert(err.message);
+  }
+}
+
+function handleSubmissionComplete_(record) {
+  sendCompletionNotifications_(record);
+  maybeGenerateFlashReportOnComplete_(record);
+}
+
+function maybeGenerateFlashReportOnComplete_(record) {
+  if (!isFeatureEnabled_('AUTO_GENERATE_FLASH_REPORT_ON_COMPLETE')) {
+    return;
+  }
+
+  if (!isFeatureEnabled_('FLASH_REPORT_GENERATION_ENABLED')) {
+    logEvent_('auto_flash_report_generation_skipped', record.company_name, record.month, 'Auto flash report skipped because generation is disabled', {});
+    return;
+  }
+
+  if (record.flash_report_url) {
+    return;
+  }
+
+  try {
+    generateFlashReport(record.company_name, record.month);
+  } catch (err) {
+    logEvent_('auto_flash_report_generation_failed', record.company_name, record.month, 'Auto flash report generation failed', {
+      error: err.message
+    });
+  }
 }
 
 function listReportSourceFiles_(folder) {
@@ -89,23 +125,23 @@ function extractFileText_(file) {
   const extension = getFileExtension_(file.getName());
 
   if (mimeType === MimeType.GOOGLE_SHEETS) {
-    return truncate_(spreadsheetToCsvText_(file.getId()), CONFIG.MAX_EXTRACTED_CHARS_PER_FILE);
+    return truncate_(spreadsheetToCsvText_(file.getId()), getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE'));
   }
 
   if (extension === 'xlsx' || extension === 'xls' || mimeType === MimeType.MICROSOFT_EXCEL) {
-    return truncate_(excelToCsvText_(file), CONFIG.MAX_EXTRACTED_CHARS_PER_FILE);
+    return truncate_(excelToCsvText_(file), getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE'));
   }
 
   if (mimeType === MimeType.PDF || extension === 'pdf') {
-    return truncate_(pdfToText_(file), CONFIG.MAX_EXTRACTED_CHARS_PER_FILE);
+    return truncate_(pdfToText_(file), getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE'));
   }
 
   if (mimeType === MimeType.GOOGLE_DOCS) {
-    return truncate_(DocumentApp.openById(file.getId()).getBody().getText(), CONFIG.MAX_EXTRACTED_CHARS_PER_FILE);
+    return truncate_(DocumentApp.openById(file.getId()).getBody().getText(), getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE'));
   }
 
   if (mimeType === MimeType.CSV || mimeType === MimeType.PLAIN_TEXT || extension === 'csv' || extension === 'txt') {
-    return truncate_(file.getBlob().getDataAsString(), CONFIG.MAX_EXTRACTED_CHARS_PER_FILE);
+    return truncate_(file.getBlob().getDataAsString(), getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE'));
   }
 
   return '[Unsupported file type: ' + file.getName() + ' / ' + mimeType + ']';
@@ -114,7 +150,7 @@ function extractFileText_(file) {
 function extractFileTextForClassification_(file) {
   const mimeType = file.getMimeType();
   const extension = getFileExtension_(file.getName());
-  const maxChars = CONFIG.OPENAI_CLASSIFICATION_MAX_CHARS || CONFIG.MAX_EXTRACTED_CHARS_PER_FILE;
+  const maxChars = getConfigInteger_('OPENAI_CLASSIFICATION_MAX_CHARS') || getConfigInteger_('MAX_EXTRACTED_CHARS_PER_FILE');
 
   if (mimeType === MimeType.GOOGLE_SHEETS) {
     return spreadsheetToCsvTextWithSheetBudget_(file.getId(), maxChars);
@@ -306,6 +342,10 @@ function buildFlashReportTemplateValues_(companyName, month, extraction) {
 }
 
 function notifyCfcFlashReportReady_(companyName, month, extraction, reportUrl) {
+  if (!isFeatureEnabled_('NOTIFY_TEAM_ON_FLASH_REPORT_READY')) {
+    return;
+  }
+
   const data = {
     company_name: companyName,
     month: month,
@@ -313,7 +353,7 @@ function notifyCfcFlashReportReady_(companyName, month, extraction, reportUrl) {
     flash_report_url: reportUrl,
     tracker_url: getTrackerSpreadsheet_().getUrl()
   };
-  sendTemplatedEmail_(CONFIG.CFC_TEAM_EMAIL, EMAIL_TEMPLATES.CFC_REVIEW_FLASH_REPORT, data);
+  sendTemplatedEmail_(getConfigString_('CFC_TEAM_EMAIL'), EMAIL_TEMPLATES.CFC_REVIEW_FLASH_REPORT, data);
 }
 
 function csvEscape_(value) {

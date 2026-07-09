@@ -5,11 +5,20 @@ This repo contains files for automatically tracking portco financials inside Goo
 3. Paste all .gs files in
 4. Go to Settings -> Show "appscript.json" ...
 5. Paste in the appscript.json file
-6. Set `INTAKE_EMAIL` in `Code.gs` to the dedicated inbox, for example `reporting@cofounderscapital.com`
+6. Run setupTracker() in [Setup.gs](http://Setup.gs) and auth
 7. Add an Apps Script property named `OPENAI_API_KEY` with your OpenAI API key
-8. Run setupTracker() in [Setup.gs](http://Setup.gs) and auth
+8. In the `Master Config` sheet, confirm or edit `INTAKE_EMAIL`, `CFC_TEAM_EMAIL`, reminder schedule, notification toggles, and folder sharing settings
 9. Run `installTriggers()` in [Code.gs](http://Code.gs)
 10. On refresh, go to CFC Reporting -> Onboard company from prompts
+
+Master Config:
+
+- `setupTracker()` creates a `Master Config` tab with editable `value` cells and visible `default_value` cells. Defaults are seeded from the current Apps Script code, including `INTAKE_EMAIL=cofoundersreporting@gmail.com`, `OPENAI_MODEL=gpt-5.4-nano`, deadline/reminder timing, Gmail labels, and extraction limits.
+- Use `CFC Reporting -> Refresh master config` to add newly introduced settings without overwriting existing value cells.
+- Blank or invalid setting values fall back to the visible default, then the code default, and are logged in `Logs`.
+- Feature toggles can disable email intake, Drive watcher processing, form intake, overdue reminders, escalations, flash report generation, and automatic flash report generation on completion.
+- Notification toggles control founder and assigned board member document/completion emails, team warning emails, classification review alerts, and flash-report-ready alerts.
+- `CEO_FOLDER_ACCESS` and `BOARD_MEMBER_FOLDER_ACCESS` control whether those users are added as `none`, `viewer`, or `editor` on company folders. Use `CFC Reporting -> Apply folder sharing settings` to sync current settings to existing company folders.
 
 Email intake:
 

@@ -1,6 +1,6 @@
 function openaiExtract(prompt) {
   const payload = {
-    model: CONFIG.OPENAI_MODEL,
+    model: getConfigString_('OPENAI_MODEL'),
     instructions: 'Extract portfolio company financial metrics from messy source text. Use null when a value cannot be determined confidently. Do not guess.',
     input: [
       {
@@ -13,7 +13,7 @@ function openaiExtract(prompt) {
         ]
       }
     ],
-    max_output_tokens: CONFIG.OPENAI_MAX_OUTPUT_TOKENS,
+    max_output_tokens: getConfigInteger_('OPENAI_MAX_OUTPUT_TOKENS'),
     store: false,
     text: {
       format: {
@@ -39,7 +39,7 @@ function openaiClassifyDocument_(classificationInput) {
   }
 
   const payload = {
-    model: CONFIG.OPENAI_MODEL,
+    model: getConfigString_('OPENAI_MODEL'),
     instructions: [
       'Classify portfolio company monthly reporting documents.',
       'Return every required document type that is clearly present in the file.',
@@ -79,7 +79,7 @@ function fetchOpenAIJson_(payload, missingApiKeyMessage) {
     throw new Error(missingApiKeyMessage);
   }
 
-  const response = UrlFetchApp.fetch(CONFIG.OPENAI_ENDPOINT, {
+  const response = UrlFetchApp.fetch(getConfigString_('OPENAI_ENDPOINT'), {
     method: 'post',
     contentType: 'application/json',
     headers: {

@@ -13,7 +13,7 @@ function getOrCreateTrackerSpreadsheet_() {
     }
   }
 
-  return SpreadsheetApp.create(CONFIG.TRACKER_FILENAME);
+  return SpreadsheetApp.create(getConfigString_('TRACKER_FILENAME'));
 }
 
 function getTrackerSpreadsheet_() {
@@ -30,16 +30,18 @@ function getTrackerSpreadsheet_() {
 }
 
 function getTrackerSheet_() {
-  const sheet = getTrackerSpreadsheet_().getSheetByName(CONFIG.TRACKER_SHEET_NAME);
+  const trackerSheetName = getConfigString_('TRACKER_SHEET_NAME');
+  const sheet = getTrackerSpreadsheet_().getSheetByName(trackerSheetName);
   if (!sheet) {
-    throw new Error('Missing tracker sheet "' + CONFIG.TRACKER_SHEET_NAME + '". Run setupTracker() first.');
+    throw new Error('Missing tracker sheet "' + trackerSheetName + '". Run setupTracker() first.');
   }
   return sheet;
 }
 
 function getLogsSheet_() {
   const ss = getTrackerSpreadsheet_();
-  const sheet = ss.getSheetByName(CONFIG.LOGS_SHEET_NAME) || ss.insertSheet(CONFIG.LOGS_SHEET_NAME);
+  const sheetName = getConfigString_('LOGS_SHEET_NAME');
+  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
     sheet.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]);
     sheet.setFrozenRows(1);
@@ -49,7 +51,8 @@ function getLogsSheet_() {
 
 function getClassificationLogSheet_() {
   const ss = getTrackerSpreadsheet_();
-  const sheet = ss.getSheetByName(CONFIG.CLASSIFICATION_LOG_SHEET_NAME) || ss.insertSheet(CONFIG.CLASSIFICATION_LOG_SHEET_NAME);
+  const sheetName = getConfigString_('CLASSIFICATION_LOG_SHEET_NAME');
+  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
     sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setValues([CLASSIFICATION_LOG_HEADERS]);
     sheet.setFrozenRows(1);
@@ -63,9 +66,239 @@ function getOrCreateSheet_(ss, name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);
 }
 
+function getMasterConfigSheet_(ss) {
+  return ss.getSheetByName(CONFIG.MASTER_CONFIG_SHEET_NAME);
+}
+
+function clearMasterConfigCache_() {
+  MASTER_CONFIG_CACHE_ = null;
+}
+
+function getRuntimeConfigSnapshot_() {
+  const snapshot = {};
+  MASTER_CONFIG_DEFINITIONS.forEach(function (definition) {
+    snapshot[definition.key] = getConfigValue_(definition.key);
+  });
+  return snapshot;
+}
+
+function getConfigValue_(key) {
+  const definition = getMasterConfigDefinition_(key);
+  const valueType = definition ? definition.valueType : inferConfigValueType_(CONFIG[key]);
+  const allowedValues = definition ? definition.allowedValues : '';
+  const staticDefault = definition ? definition.defaultValue : CONFIG[key];
+  let row = null;
+
+  try {
+    row = getMasterConfigRow_(key);
+  } catch (err) {
+    return staticDefault;
+  }
+
+  const candidates = [];
+  if (row && !isConfigBlank_(row.value)) {
+    candidates.push({ source: 'value', value: row.value });
+  } else if (row && !isConfigBlank_(staticDefault)) {
+    logInvalidConfigValue_(key, 'value', row.value, 'Blank value. Falling back to default.');
+  }
+  if (row && !isConfigBlank_(row.defaultValue)) {
+    candidates.push({ source: 'default_value', value: row.defaultValue });
+  }
+  candidates.push({ source: 'static_default', value: staticDefault });
+
+  for (let i = 0; i < candidates.length; i++) {
+    const parsed = parseConfigValue_(candidates[i].value, valueType, allowedValues);
+    if (parsed.valid) {
+      return parsed.value;
+    }
+    if (candidates[i].source !== 'static_default') {
+      logInvalidConfigValue_(key, candidates[i].source, candidates[i].value, parsed.reason);
+    }
+  }
+
+  return staticDefault;
+}
+
+function getConfigString_(key) {
+  const value = getConfigValue_(key);
+  return value === null || value === undefined ? '' : String(value);
+}
+
+function getConfigInteger_(key) {
+  const value = getConfigValue_(key);
+  const number = Number(value);
+  return isNaN(number) ? 0 : Math.floor(number);
+}
+
+function isFeatureEnabled_(key) {
+  return getConfigValue_(key) === true;
+}
+
+function getMasterConfigDefinition_(key) {
+  for (let i = 0; i < MASTER_CONFIG_DEFINITIONS.length; i++) {
+    if (MASTER_CONFIG_DEFINITIONS[i].key === key) {
+      return MASTER_CONFIG_DEFINITIONS[i];
+    }
+  }
+  return null;
+}
+
+function getMasterConfigRow_(key) {
+  const rows = getMasterConfigRows_();
+  return rows[key] || null;
+}
+
+function getMasterConfigRows_() {
+  if (MASTER_CONFIG_CACHE_) {
+    return MASTER_CONFIG_CACHE_;
+  }
+
+  const rowsByKey = {};
+  const ss = getTrackerSpreadsheet_();
+  const sheet = getMasterConfigSheet_(ss);
+  if (!sheet || sheet.getLastRow() < 2) {
+    MASTER_CONFIG_CACHE_ = rowsByKey;
+    return rowsByKey;
+  }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+  const keyIndex = headers.indexOf('setting_key');
+  const valueIndex = headers.indexOf('value');
+  const defaultIndex = headers.indexOf('default_value');
+  if (keyIndex < 0 || valueIndex < 0 || defaultIndex < 0) {
+    MASTER_CONFIG_CACHE_ = rowsByKey;
+    return rowsByKey;
+  }
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  values.forEach(function (row) {
+    const key = String(row[keyIndex] || '').trim();
+    if (!key) {
+      return;
+    }
+    rowsByKey[key] = {
+      value: row[valueIndex],
+      defaultValue: row[defaultIndex]
+    };
+  });
+
+  MASTER_CONFIG_CACHE_ = rowsByKey;
+  return rowsByKey;
+}
+
+function parseConfigValue_(rawValue, valueType, allowedValues) {
+  if (valueType === 'boolean') {
+    return parseBooleanConfigValue_(rawValue);
+  }
+
+  if (valueType === 'integer') {
+    const number = Number(rawValue);
+    if (!isFinite(number) || Math.floor(number) !== number || number < 0) {
+      return { valid: false, reason: 'Expected a non-negative integer.' };
+    }
+    return { valid: true, value: number };
+  }
+
+  if (valueType === 'enum') {
+    const choices = splitAllowedValues_(allowedValues);
+    const value = String(rawValue || '').trim().toLowerCase();
+    if (choices.indexOf(value) < 0) {
+      return { valid: false, reason: 'Expected one of: ' + choices.join(', ') + '.' };
+    }
+    return { valid: true, value: value };
+  }
+
+  if (isConfigBlank_(rawValue)) {
+    return { valid: false, reason: 'Expected a non-blank value.' };
+  }
+  return { valid: true, value: String(rawValue).trim() };
+}
+
+function parseBooleanConfigValue_(rawValue) {
+  if (rawValue === true || rawValue === false) {
+    return { valid: true, value: rawValue };
+  }
+
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (['true', 'yes', 'y', '1', 'enabled', 'on'].indexOf(value) >= 0) {
+    return { valid: true, value: true };
+  }
+  if (['false', 'no', 'n', '0', 'disabled', 'off'].indexOf(value) >= 0) {
+    return { valid: true, value: false };
+  }
+  return { valid: false, reason: 'Expected TRUE or FALSE.' };
+}
+
+function serializeConfigValue_(value, valueType) {
+  if (valueType === 'boolean') {
+    return value === true;
+  }
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return value;
+}
+
+function inferConfigValueType_(value) {
+  if (typeof value === 'boolean') {
+    return 'boolean';
+  }
+  if (typeof value === 'number') {
+    return 'integer';
+  }
+  return 'string';
+}
+
+function isConfigBlank_(value) {
+  return value === null || value === undefined || String(value).trim() === '';
+}
+
+function splitAllowedValues_(allowedValues) {
+  return String(allowedValues || '')
+    .split(',')
+    .map(function (value) {
+      return value.trim().toLowerCase();
+    })
+    .filter(Boolean);
+}
+
+function logInvalidConfigValue_(key, source, value, reason) {
+  const warningKey = key + '|' + source + '|' + String(value);
+  if (CONFIG_WARNING_CACHE_[warningKey]) {
+    return;
+  }
+  CONFIG_WARNING_CACHE_[warningKey] = true;
+
+  try {
+    const ss = getTrackerSpreadsheet_();
+    const sheet = ss.getSheetByName(CONFIG.LOGS_SHEET_NAME) || ss.insertSheet(CONFIG.LOGS_SHEET_NAME);
+    if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
+      sheet.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]);
+      sheet.setFrozenRows(1);
+    }
+    sheet.appendRow([
+      new Date(),
+      'invalid_master_config_value',
+      '',
+      '',
+      'Invalid Master Config value ignored for ' + key,
+      safeJsonStringify_({
+        settingKey: key,
+        source: source,
+        value: value,
+        reason: reason
+      })
+    ]);
+  } catch (err) {
+    // Logging configuration errors must never block runtime fallback behavior.
+  }
+}
+
 function getRequiredDocs_() {
   const ss = getTrackerSpreadsheet_();
-  const sheet = ss.getSheetByName(CONFIG.REQUIRED_DOCS_SHEET_NAME);
+  const sheet = ss.getSheetByName(getConfigString_('REQUIRED_DOCS_SHEET_NAME'));
   if (!sheet || sheet.getLastRow() < 2) {
     return CONFIG.DEFAULT_DOCS.slice();
   }
@@ -235,6 +468,15 @@ function applyTrackerNumberFormats_(sheet, headers) {
   }
 }
 
+function handleMasterConfigEdit_(e) {
+  if (!e || !e.range) {
+    return;
+  }
+  if (e.range.getSheet().getName() === CONFIG.MASTER_CONFIG_SHEET_NAME) {
+    clearMasterConfigCache_();
+  }
+}
+
 function handleSubmissionTrackerEdit_(e) {
   if (!e || !e.range) {
     return;
@@ -242,7 +484,7 @@ function handleSubmissionTrackerEdit_(e) {
 
   const range = e.range;
   const sheet = range.getSheet();
-  if (sheet.getName() !== CONFIG.TRACKER_SHEET_NAME || range.getRow() < 2) {
+  if (sheet.getName() !== getConfigString_('TRACKER_SHEET_NAME') || range.getRow() < 2) {
     return;
   }
 
@@ -422,7 +664,7 @@ function getRootFolder_(createIfMissing) {
     }
   }
 
-  const folders = DriveApp.getFoldersByName(CONFIG.ROOT_FOLDER_NAME);
+  const folders = DriveApp.getFoldersByName(getConfigString_('ROOT_FOLDER_NAME'));
   if (folders.hasNext()) {
     const folder = folders.next();
     setScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID, folder.getId());
@@ -433,7 +675,7 @@ function getRootFolder_(createIfMissing) {
     return null;
   }
 
-  const folder = DriveApp.createFolder(CONFIG.ROOT_FOLDER_NAME);
+  const folder = DriveApp.createFolder(getConfigString_('ROOT_FOLDER_NAME'));
   setScriptProperty_(PROPERTY_KEYS.ROOT_FOLDER_ID, folder.getId());
   return folder;
 }
@@ -459,6 +701,88 @@ function getCompanyMonthFolder_(companyName, month, createIfMissing) {
     return null;
   }
   return getNamedFolder_(companyFolder, month, createIfMissing);
+}
+
+function applyCompanyFolderSharing_(companyFolder, company) {
+  if (!companyFolder || !company) {
+    return;
+  }
+
+  const companyName = company.companyName || company.company_name || '';
+  applyFolderAccess_(companyFolder, company.ceoEmail || company.ceo_email, getConfigValue_('CEO_FOLDER_ACCESS'), 'CEO', companyName);
+  applyFolderAccess_(companyFolder, company.boardMemberEmail || company.board_member_email, getConfigValue_('BOARD_MEMBER_FOLDER_ACCESS'), 'board member', companyName);
+}
+
+function applyFolderSharingSettings() {
+  const companies = getLatestCompanyProfiles_();
+  let updatedCount = 0;
+
+  companies.forEach(function (company) {
+    const folder = getCompanyFolder_(company.company_name, false);
+    if (!folder) {
+      return;
+    }
+    applyCompanyFolderSharing_(folder, company);
+    updatedCount++;
+  });
+
+  logEvent_('folder_sharing_settings_applied', '', '', 'Applied folder sharing settings to company folders', {
+    companyCount: updatedCount,
+    ceoAccess: getConfigValue_('CEO_FOLDER_ACCESS'),
+    boardMemberAccess: getConfigValue_('BOARD_MEMBER_FOLDER_ACCESS')
+  });
+  SpreadsheetApp.getUi().alert('Folder sharing settings applied to ' + updatedCount + ' company folders.');
+}
+
+function applyFolderAccess_(folder, email, access, roleLabel, companyName) {
+  const recipient = String(email || '').trim();
+  if (!recipient) {
+    return;
+  }
+
+  const normalizedAccess = String(access || 'none').toLowerCase();
+  try {
+    if (normalizedAccess === 'none') {
+      removeFolderAccess_(folder, recipient);
+      return;
+    }
+
+    if (normalizedAccess === 'viewer') {
+      try {
+        folder.removeEditor(recipient);
+      } catch (removeEditorErr) {
+        // The user may not be an editor; continue with viewer access.
+      }
+      folder.addViewer(recipient);
+      return;
+    }
+
+    if (normalizedAccess === 'editor') {
+      folder.addEditor(recipient);
+      return;
+    }
+  } catch (err) {
+    logEvent_('folder_sharing_error', companyName || '', '', 'Could not apply folder sharing setting', {
+      role: roleLabel,
+      email: recipient,
+      access: normalizedAccess,
+      folderUrl: folder.getUrl(),
+      error: err.message
+    });
+  }
+}
+
+function removeFolderAccess_(folder, email) {
+  try {
+    folder.removeEditor(email);
+  } catch (editorErr) {
+    // Ignore when the user is not an editor or cannot be removed.
+  }
+  try {
+    folder.removeViewer(email);
+  } catch (viewerErr) {
+    // Ignore when the user is not a viewer or cannot be removed.
+  }
 }
 
 function moveFileToFolder_(file, folder) {
@@ -490,7 +814,7 @@ function getUploadForm_(throwIfMissing) {
 
 function getFormUrl_() {
   const form = getUploadForm_(false);
-  return form ? form.getPublishedUrl() : CONFIG.FORM_URL;
+  return form ? form.getPublishedUrl() : getConfigString_('FORM_URL');
 }
 
 function findFormItemByTitle_(form, title) {
@@ -541,12 +865,12 @@ function calculateDaysOverdue_(deadline, now) {
 
 function getDeadlineForReportingMonth_(month) {
   const parts = parseMonth_(month);
-  return new Date(parts.year, parts.monthIndex + 1, CONFIG.TARGET_DAY_OF_MONTH);
+  return new Date(parts.year, parts.monthIndex + 1, getConfigInteger_('TARGET_DAY_OF_MONTH'));
 }
 
 function getDefaultReportingMonth_(date) {
-  const day = Number(Utilities.formatDate(date, CONFIG.TIMEZONE, 'd'));
-  if (day <= CONFIG.TARGET_DAY_OF_MONTH) {
+  const day = Number(Utilities.formatDate(date, getConfigString_('TIMEZONE'), 'd'));
+  if (day <= getConfigInteger_('TARGET_DAY_OF_MONTH')) {
     return formatMonth_(addMonths_(date, -1));
   }
   return formatMonth_(date);
@@ -573,21 +897,21 @@ function isValidMonth_(month) {
 }
 
 function formatMonth_(date) {
-  return Utilities.formatDate(date, CONFIG.TIMEZONE, 'yyyy-MM');
+  return Utilities.formatDate(date, getConfigString_('TIMEZONE'), 'yyyy-MM');
 }
 
 function formatDate_(date) {
   if (!date) {
     return '';
   }
-  return Utilities.formatDate(asDate_(date), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+  return Utilities.formatDate(asDate_(date), getConfigString_('TIMEZONE'), 'yyyy-MM-dd');
 }
 
 function formatDateTime_(date) {
   if (!date) {
     return '';
   }
-  return Utilities.formatDate(asDate_(date), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
+  return Utilities.formatDate(asDate_(date), getConfigString_('TIMEZONE'), 'yyyy-MM-dd HH:mm');
 }
 
 function startOfDay_(date) {

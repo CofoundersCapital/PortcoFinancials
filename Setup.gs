@@ -8,6 +8,7 @@ function setupTracker() {
 
   moveFileToFolder_(DriveApp.getFileById(ss.getId()), trackerFolder);
 
+  setupMasterConfigSheet_(ss);
   setupRequiredDocsSheet_(ss);
   setupSubmissionsSheet_(ss);
   setupLogsSheet_(ss);
@@ -18,13 +19,13 @@ function setupTracker() {
   logEvent_('setup_complete', '', '', 'Tracker setup completed', {
     spreadsheetUrl: ss.getUrl(),
     rootFolderUrl: rootFolder.getUrl(),
-    intakeEmail: CONFIG.INTAKE_EMAIL
+    intakeEmail: getConfigString_('INTAKE_EMAIL')
   });
 
   return {
     spreadsheetUrl: ss.getUrl(),
     rootFolderUrl: rootFolder.getUrl(),
-    intakeEmail: CONFIG.INTAKE_EMAIL
+    intakeEmail: getConfigString_('INTAKE_EMAIL')
   };
 }
 
@@ -33,12 +34,12 @@ function setupUploadForm() {
   let form = getUploadForm_(false);
 
   if (!form) {
-    form = FormApp.create(CONFIG.FORM_TITLE);
+    form = FormApp.create(getConfigString_('FORM_TITLE'));
     setScriptProperty_(PROPERTY_KEYS.UPLOAD_FORM_ID, form.getId());
     moveFileToFolder_(DriveApp.getFileById(form.getId()), getRootFolder_(true));
   }
 
-  form.setTitle(CONFIG.FORM_TITLE);
+  form.setTitle(getConfigString_('FORM_TITLE'));
   form.setDescription('Submit monthly financial materials for Cofounders Capital reporting.');
   form.setAcceptingResponses(true);
   form.setCollectEmail(true);
@@ -112,7 +113,7 @@ function onboardCompany(companyInput) {
   ensureTrackerColumns_(sheet, docs);
 
   const companyFolder = getCompanyFolder_(company.companyName, true);
-  companyFolder.addEditor(company.ceoEmail);
+  applyCompanyFolderSharing_(companyFolder, company);
   getCompanyMonthFolder_(company.companyName, month, true);
 
   const existingRow = findSubmissionRow_(company.companyName, month);
@@ -187,6 +188,8 @@ function monthlyRolloverJob() {
       board_member_email: company.board_member_email,
       deadline: getDeadlineForReportingMonth_(month)
     });
+    const companyFolder = getCompanyFolder_(company.company_name, true);
+    applyCompanyFolderSharing_(companyFolder, company);
     getCompanyMonthFolder_(company.company_name, month, true);
     createdCount++;
   });
@@ -195,8 +198,120 @@ function monthlyRolloverJob() {
   logEvent_('monthly_rollover', '', month, 'Monthly rollover created rows', { createdCount: createdCount });
 }
 
+function setupMasterConfigSheet_(ss) {
+  const sheet = getOrCreateSheet_(ss, CONFIG.MASTER_CONFIG_SHEET_NAME);
+  const existingValuesByKey = getExistingMasterConfigValues_(sheet);
+  const rows = MASTER_CONFIG_DEFINITIONS.map(function (definition) {
+    const existing = existingValuesByKey[definition.key];
+    const value = existing
+      ? existing.value
+      : serializeConfigValue_(definition.defaultValue, definition.valueType);
+    return [
+      definition.category,
+      definition.key,
+      definition.displayName,
+      value,
+      serializeConfigValue_(definition.defaultValue, definition.valueType),
+      definition.valueType,
+      definition.allowedValues,
+      definition.description
+    ];
+  });
+
+  const existingFilter = sheet.getFilter();
+  if (existingFilter) {
+    existingFilter.remove();
+  }
+  sheet.clear();
+  sheet.getRange(1, 1, 1, MASTER_CONFIG_HEADERS.length).setValues([MASTER_CONFIG_HEADERS]);
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, MASTER_CONFIG_HEADERS.length).setValues(rows);
+  }
+
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, MASTER_CONFIG_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
+  sheet.getRange(1, 1, sheet.getMaxRows(), MASTER_CONFIG_HEADERS.length).createFilter();
+  sheet.getRange(2, 4, Math.max(1, rows.length), 1).setBackground('#fff2cc');
+  applyMasterConfigValidation_(sheet, rows.length);
+  sheet.autoResizeColumns(1, MASTER_CONFIG_HEADERS.length);
+  clearMasterConfigCache_();
+}
+
+function refreshMasterConfigSheet() {
+  setupMasterConfigSheet_(getTrackerSpreadsheet_());
+  SpreadsheetApp.getUi().alert('Master Config refreshed. Existing value cells were preserved.');
+}
+
+function getExistingMasterConfigValues_(sheet) {
+  const valuesByKey = {};
+  if (!sheet || sheet.getLastRow() < 2) {
+    return valuesByKey;
+  }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+  const keyIndex = headers.indexOf('setting_key');
+  const valueIndex = headers.indexOf('value');
+  if (keyIndex < 0 || valueIndex < 0) {
+    return valuesByKey;
+  }
+
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  rows.forEach(function (row) {
+    const key = String(row[keyIndex] || '').trim();
+    if (key) {
+      valuesByKey[key] = {
+        value: row[valueIndex]
+      };
+    }
+  });
+  return valuesByKey;
+}
+
+function applyMasterConfigValidation_(sheet, definitionCount) {
+  if (definitionCount < 1) {
+    return;
+  }
+
+  const valueColumn = 4;
+  const typeColumn = 6;
+  const allowedColumn = 7;
+  sheet.getRange(2, typeColumn, definitionCount, 1).setNumberFormat('@');
+  sheet.getRange(2, allowedColumn, definitionCount, 1).setNumberFormat('@');
+
+  MASTER_CONFIG_DEFINITIONS.forEach(function (definition, index) {
+    const row = index + 2;
+    const valueCell = sheet.getRange(row, valueColumn);
+    valueCell.clearDataValidations();
+
+    if (definition.valueType === 'boolean') {
+      valueCell.insertCheckboxes();
+      return;
+    }
+
+    if (definition.valueType === 'enum') {
+      const choices = splitAllowedValues_(definition.allowedValues);
+      if (choices.length > 0) {
+        valueCell.setDataValidation(SpreadsheetApp.newDataValidation()
+          .requireValueInList(choices, true)
+          .setAllowInvalid(false)
+          .build());
+      }
+      return;
+    }
+
+    if (definition.valueType === 'integer') {
+      valueCell.setDataValidation(SpreadsheetApp.newDataValidation()
+        .requireNumberGreaterThanOrEqualTo(0)
+        .setAllowInvalid(false)
+        .build());
+    }
+  });
+}
+
 function setupRequiredDocsSheet_(ss) {
-  const sheet = getOrCreateSheet_(ss, CONFIG.REQUIRED_DOCS_SHEET_NAME);
+  const sheet = getOrCreateSheet_(ss, getConfigString_('REQUIRED_DOCS_SHEET_NAME'));
   sheet.clear();
   sheet.getRange(1, 1, 1, 3).setValues([['doc_key', 'display_name', 'accepted_extensions']]);
   const values = CONFIG.DEFAULT_DOCS.map(function (doc) {
@@ -209,7 +324,7 @@ function setupRequiredDocsSheet_(ss) {
 }
 
 function setupSubmissionsSheet_(ss) {
-  const sheet = getOrCreateSheet_(ss, CONFIG.TRACKER_SHEET_NAME);
+  const sheet = getOrCreateSheet_(ss, getConfigString_('TRACKER_SHEET_NAME'));
   const docs = getRequiredDocs_();
   const headers = buildSubmissionHeaders_(docs);
   const existingFilter = sheet.getFilter();
@@ -249,7 +364,7 @@ function refreshSubmissionTrackerLayout() {
 }
 
 function setupLogsSheet_(ss) {
-  const sheet = getOrCreateSheet_(ss, CONFIG.LOGS_SHEET_NAME);
+  const sheet = getOrCreateSheet_(ss, getConfigString_('LOGS_SHEET_NAME'));
   if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
     sheet.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]);
     sheet.setFrozenRows(1);
@@ -259,7 +374,7 @@ function setupLogsSheet_(ss) {
 }
 
 function setupClassificationLogSheet_(ss) {
-  const sheet = getOrCreateSheet_(ss, CONFIG.CLASSIFICATION_LOG_SHEET_NAME);
+  const sheet = getOrCreateSheet_(ss, getConfigString_('CLASSIFICATION_LOG_SHEET_NAME'));
   if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
     sheet.getRange(1, 1, 1, CLASSIFICATION_LOG_HEADERS.length).setValues([CLASSIFICATION_LOG_HEADERS]);
     sheet.setFrozenRows(1);
