@@ -222,6 +222,7 @@ function setupMasterConfigSheet_(ss) {
   if (existingFilter) {
     existingFilter.remove();
   }
+  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
   sheet.clear();
   sheet.getRange(1, 1, 1, MASTER_CONFIG_HEADERS.length).setValues([MASTER_CONFIG_HEADERS]);
   if (rows.length > 0) {
