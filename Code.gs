@@ -10,6 +10,8 @@ const CONFIG = {
   INTAKE_EMAIL: 'cofoundersreporting@gmail.com',
   GMAIL_LOOKBACK_DAYS: 90,
   GMAIL_SEARCH_BATCH_SIZE: 50,
+  GMAIL_WATCHER_INTERVAL_MINUTES: 30,
+  DRIVE_WATCHER_INTERVAL_MINUTES: 30,
   GMAIL_PROCESSED_LABEL: 'CFC_Reporting_Processed',
   GMAIL_NEEDS_REVIEW_LABEL: 'CFC_Reporting_Needs_Review',
   TARGET_DAY_OF_MONTH: 10,
@@ -236,6 +238,24 @@ const MASTER_CONFIG_DEFINITIONS = [
     valueType: 'integer',
     allowedValues: '',
     description: 'Maximum number of Gmail threads processed per watcher run.'
+  },
+  {
+    category: 'Automatic watchers',
+    key: 'GMAIL_WATCHER_INTERVAL_MINUTES',
+    displayName: 'Gmail watcher interval minutes',
+    defaultValue: CONFIG.GMAIL_WATCHER_INTERVAL_MINUTES,
+    valueType: 'enum',
+    allowedValues: '1, 5, 10, 15, 30',
+    description: 'How often the automatic Gmail intake watcher runs. Run Install triggers after changing this.'
+  },
+  {
+    category: 'Automatic watchers',
+    key: 'DRIVE_WATCHER_INTERVAL_MINUTES',
+    displayName: 'Drive watcher interval minutes',
+    defaultValue: CONFIG.DRIVE_WATCHER_INTERVAL_MINUTES,
+    valueType: 'enum',
+    allowedValues: '1, 5, 10, 15, 30',
+    description: 'How often the automatic Drive folder watcher runs. Run Install triggers after changing this.'
   },
   {
     category: 'Email intake',
@@ -562,16 +582,16 @@ function installTriggers() {
       .inTimezone(getConfigString_('TIMEZONE'));
   });
 
-  ensureTimeTrigger_('driveFolderWatcher', 'watcher', function () {
+  replaceTimeTrigger_('driveFolderWatcher', 'watcher', function () {
     return ScriptApp.newTrigger('driveFolderWatcher')
       .timeBased()
-      .everyMinutes(30);
+      .everyMinutes(getConfigInteger_('DRIVE_WATCHER_INTERVAL_MINUTES'));
   });
 
-  ensureTimeTrigger_('gmailInboxWatcher', 'email watcher', function () {
+  replaceTimeTrigger_('gmailInboxWatcher', 'email watcher', function () {
     return ScriptApp.newTrigger('gmailInboxWatcher')
       .timeBased()
-      .everyMinutes(30);
+      .everyMinutes(getConfigInteger_('GMAIL_WATCHER_INTERVAL_MINUTES'));
   });
 
   const formId = getScriptProperty_(PROPERTY_KEYS.UPLOAD_FORM_ID);

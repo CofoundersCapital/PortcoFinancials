@@ -17,6 +17,7 @@ Master Config:
 - Use `CFC Reporting -> Refresh master config` to add newly introduced settings without overwriting existing value cells.
 - Blank or invalid setting values fall back to the visible default, then the code default, and are logged in `Logs`.
 - Feature toggles can disable email intake, Drive watcher processing, form intake, overdue reminders, escalations, flash report generation, and automatic flash report generation on completion.
+- `GMAIL_WATCHER_INTERVAL_MINUTES` and `DRIVE_WATCHER_INTERVAL_MINUTES` control how often automatic watcher triggers run. After changing either value, run `CFC Reporting -> Install triggers` so Apps Script recreates those triggers at the new frequency.
 - Notification toggles control founder and assigned board member document/completion emails, team warning emails, classification review alerts, and flash-report-ready alerts.
 - `CEO_FOLDER_ACCESS` and `BOARD_MEMBER_FOLDER_ACCESS` control whether those users are added as `none`, `viewer`, or `editor` on company folders. Use `CFC Reporting -> Apply folder sharing settings` to sync current settings to existing company folders.
 

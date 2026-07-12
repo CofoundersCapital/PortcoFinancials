@@ -1026,6 +1026,23 @@ function ensureTimeTrigger_(handlerFunction, label, builderFactory) {
   });
 }
 
+function replaceTimeTrigger_(handlerFunction, label, builderFactory) {
+  deleteTriggersForHandler_(handlerFunction);
+  builderFactory().create();
+  logEvent_('trigger_installed', '', '', 'Installed ' + label + ' trigger', {
+    handlerFunction: handlerFunction,
+    replacedExisting: true
+  });
+}
+
+function deleteTriggersForHandler_(handlerFunction) {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === handlerFunction) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+}
+
 function appendNote_(sheet, rowNumber, note) {
   const existing = String(getCellByHeader_(sheet, rowNumber, 'notes') || '').trim();
   const stamped = '[' + formatDateTime_(new Date()) + '] ' + note;
