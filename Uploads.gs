@@ -39,10 +39,14 @@ function onFormSubmit(e) {
       month: submission.month
     }, matchedDocs);
     if (classification.matchedDocs.length > 0 && matchedDocs.length === 0) {
+      if (classification.file) {
+        rememberDriveClassification_(classification.file, beforeRecord, docs, 'form_upload', classification);
+      }
       return;
     }
     if (matchedDocs.length > 0 && classification.file) {
       saveDriveFileForDocs_(classification.file, targetFolder, matchedDocs, true);
+      rememberDriveClassification_(classification.file, beforeRecord, docs, 'form_upload', classification);
     }
     markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
     sendDocumentReceivedNotifications_(beforeRecord, matchedDocs, 'form_upload', classification.fileName || (classification.file ? classification.file.getName() : ''));
@@ -78,7 +82,11 @@ function driveFolderWatcher() {
   const sheet = getTrackerSheet_();
   const docs = getRequiredDocs_();
   const records = getRecords_(sheet);
+  clearDriveClassificationRegistryCache_();
   let updatedRows = 0;
+  let classifiedFiles = 0;
+  let skippedAlreadyClassifiedFiles = 0;
+  let cachedDocUpdates = 0;
 
   records.forEach(function (entry) {
     const record = entry.record;
@@ -97,6 +105,21 @@ function driveFolderWatcher() {
     let rowUpdated = false;
 
     listFilesInFolder_(folder).forEach(function (file) {
+      const cached = getCachedDriveClassification_(file, record, docs);
+      if (cached) {
+        skippedAlreadyClassifiedFiles++;
+        const cachedDocs = getDocsFromCachedDriveClassification_(cached, docs);
+        const cachedMatchedDocs = filterMatchedDocsForUpdate_(cachedDocs, updatedDocKeys, record);
+        if (cachedMatchedDocs.length > 0) {
+          markMatchedDocsReceived_(sheet, entry.rowNumber, cachedMatchedDocs, updatedDocKeys, []);
+          sendDocumentReceivedNotifications_(record, cachedMatchedDocs, 'drive_watcher_cached', cached.file_name || file.getName());
+          rowUpdated = true;
+          cachedDocUpdates += cachedMatchedDocs.length;
+        }
+        return;
+      }
+
+      classifiedFiles++;
       const classification = classifyDriveFileForDocs_(file, docs, missingDocs);
       const matchedDocs = filterMatchedDocsForUpdate_(classification.matchedDocs, updatedDocKeys, record);
       logDocumentClassificationAudit_(classification, {
@@ -106,15 +129,18 @@ function driveFolderWatcher() {
       }, matchedDocs);
       if (classification.matchedDocs.length === 0) {
         recordDocumentClassificationNeedsReview_(sheet, entry.rowNumber, record, 'drive_watcher', file, classification.reason, classification.raw);
+        rememberDriveClassification_(file, record, docs, 'drive_watcher', classification);
         return;
       }
       if (matchedDocs.length === 0) {
+        rememberDriveClassification_(file, record, docs, 'drive_watcher', classification);
         return;
       }
 
       saveDriveFileForDocs_(file, folder, matchedDocs, false);
       markMatchedDocsReceived_(sheet, entry.rowNumber, matchedDocs, updatedDocKeys, []);
       sendDocumentReceivedNotifications_(record, matchedDocs, 'drive_watcher', classification.fileName || file.getName());
+      rememberDriveClassification_(file, record, docs, 'drive_watcher', classification);
       rowUpdated = true;
     });
 
@@ -129,7 +155,12 @@ function driveFolderWatcher() {
     }
   });
 
-  logEvent_('drive_watcher_complete', '', '', 'Drive folder watcher complete', { updatedRows: updatedRows });
+  logEvent_('drive_watcher_complete', '', '', 'Drive folder watcher complete', {
+    updatedRows: updatedRows,
+    classifiedFiles: classifiedFiles,
+    skippedAlreadyClassifiedFiles: skippedAlreadyClassifiedFiles,
+    cachedDocUpdates: cachedDocUpdates
+  });
 }
 
 function gmailInboxWatcher() {
@@ -219,10 +250,11 @@ function processGmailThread_(thread, sheet, docs) {
         return;
       }
 
-      saveEmailAttachmentToFolder_(attachment, folder, matchedDocs);
+      const savedFile = saveEmailAttachmentToFolder_(attachment, folder, matchedDocs);
       result.attachmentsSaved++;
       markMatchedDocsReceived_(sheet, rowNumber, matchedDocs, updatedDocKeys, processedDocKeys);
       sendDocumentReceivedNotifications_(record, matchedDocs, 'gmail_attachment', classification.fileName || attachment.getName());
+      rememberDriveClassification_(savedFile, record, docs, 'gmail_attachment', classification);
       rowUpdated = true;
     });
 
@@ -386,6 +418,7 @@ function processSubmittedChecklistFile_(fileId, docs, missingDocs, sheet, rowNum
   classification.file = file;
   if (classification.matchedDocs.length === 0) {
     recordDocumentClassificationNeedsReview_(sheet, rowNumber, record, 'form_upload', file, classification.reason, classification.raw);
+    rememberDriveClassification_(file, record, docs, 'form_upload', classification);
   }
   return classification;
 }

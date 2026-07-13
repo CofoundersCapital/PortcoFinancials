@@ -62,6 +62,19 @@ function getClassificationLogSheet_() {
   return sheet;
 }
 
+function getDriveClassificationRegistrySheet_() {
+  const ss = getTrackerSpreadsheet_();
+  const sheet = ss.getSheetByName(CONFIG.DRIVE_CLASSIFICATION_REGISTRY_SHEET_NAME)
+    || ss.insertSheet(CONFIG.DRIVE_CLASSIFICATION_REGISTRY_SHEET_NAME);
+  if (sheet.getLastRow() === 0 || sheet.getRange(1, 1).isBlank()) {
+    sheet.getRange(1, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setValues([DRIVE_CLASSIFICATION_REGISTRY_HEADERS]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
+    sheet.getRange(1, 1, sheet.getMaxRows(), DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).createFilter();
+  }
+  return sheet;
+}
+
 function getOrCreateSheet_(ss, name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);
 }
@@ -293,6 +306,201 @@ function logInvalidConfigValue_(key, source, value, reason) {
     ]);
   } catch (err) {
     // Logging configuration errors must never block runtime fallback behavior.
+  }
+}
+
+function getCachedDriveClassification_(file, record, docs) {
+  const fileId = getDriveFileIdSafe_(file);
+  if (!fileId || !record) {
+    return null;
+  }
+
+  const docsSignature = buildRequiredDocsSignature_(docs);
+  const key = buildDriveClassificationRegistryKey_(fileId, record.company_name, record.month, docsSignature);
+  const cached = getDriveClassificationRegistryMap_()[key];
+  if (!cached) {
+    return null;
+  }
+
+  const currentFingerprint = buildDriveClassificationFileFingerprint_(file);
+  return cached.file_fingerprint === currentFingerprint ? cached : null;
+}
+
+function clearDriveClassificationRegistryCache_() {
+  DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = null;
+}
+
+function rememberDriveClassification_(file, record, docs, source, classification) {
+  if (!shouldRememberDriveClassification_(classification)) {
+    return;
+  }
+
+  const fileId = getDriveFileIdSafe_(file);
+  if (!fileId || !record) {
+    return;
+  }
+
+  const docsSignature = buildRequiredDocsSignature_(docs);
+  const fingerprint = buildDriveClassificationFileFingerprint_(file);
+  const matchedDocKeys = (classification.matchedDocs || []).map(function (doc) {
+    return doc.doc_key;
+  }).join(',');
+  const status = matchedDocKeys ? 'matched' : 'no_match';
+  const fileUrl = getDriveFileUrlSafe_(file);
+  const row = [
+    new Date(),
+    fileId,
+    record.company_name || '',
+    record.month || '',
+    docsSignature,
+    fingerprint,
+    source || '',
+    status,
+    matchedDocKeys,
+    file.getName(),
+    fileUrl,
+    classification.reason || ''
+  ];
+
+  const sheet = getDriveClassificationRegistrySheet_();
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setValues([row]);
+
+  const key = buildDriveClassificationRegistryKey_(fileId, record.company_name, record.month, docsSignature);
+  const registry = getDriveClassificationRegistryMap_();
+  registry[key] = buildDriveClassificationRegistryRecordFromRow_(row);
+}
+
+function shouldRememberDriveClassification_(classification) {
+  if (!classification) {
+    return false;
+  }
+  if (classification.matchedDocs && classification.matchedDocs.length > 0) {
+    return true;
+  }
+  if (classification.raw) {
+    return true;
+  }
+
+  const reason = String(classification.reason || '').toLowerCase();
+  if (reason.indexOf('no required document types accept extension') === 0) {
+    return true;
+  }
+  return false;
+}
+
+function getDocsFromCachedDriveClassification_(cached, docs) {
+  const docsByKey = {};
+  docs.forEach(function (doc) {
+    docsByKey[doc.doc_key] = doc;
+  });
+
+  return String(cached.matched_doc_keys || '')
+    .split(',')
+    .map(function (key) {
+      return docsByKey[String(key || '').trim()];
+    })
+    .filter(Boolean);
+}
+
+function getDriveClassificationRegistryMap_() {
+  if (DRIVE_CLASSIFICATION_REGISTRY_CACHE_) {
+    return DRIVE_CLASSIFICATION_REGISTRY_CACHE_;
+  }
+
+  const registry = {};
+  const sheet = getDriveClassificationRegistrySheet_();
+  if (sheet.getLastRow() < 2) {
+    DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = registry;
+    return registry;
+  }
+
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).getValues();
+  rows.forEach(function (row) {
+    const record = buildDriveClassificationRegistryRecordFromRow_(row);
+    if (!record.file_id || !record.docs_signature) {
+      return;
+    }
+    registry[buildDriveClassificationRegistryKey_(record.file_id, record.company_name, record.month, record.docs_signature)] = record;
+  });
+
+  DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = registry;
+  return registry;
+}
+
+function buildDriveClassificationRegistryRecordFromRow_(row) {
+  const record = {};
+  DRIVE_CLASSIFICATION_REGISTRY_HEADERS.forEach(function (header, index) {
+    record[header] = row[index];
+  });
+  return record;
+}
+
+function buildDriveClassificationRegistryKey_(fileId, companyName, month, docsSignature) {
+  return [
+    String(fileId || '').trim(),
+    normalizeText_(companyName),
+    String(month || '').trim(),
+    String(docsSignature || '').trim()
+  ].join('|');
+}
+
+function buildRequiredDocsSignature_(docs) {
+  return (docs || []).map(function (doc) {
+    return [
+      doc.doc_key,
+      normalizeText_(doc.display_name),
+      normalizeText_(doc.accepted_extensions)
+    ].join(':');
+  }).sort().join('|');
+}
+
+function buildDriveClassificationFileFingerprint_(file) {
+  return [
+    getDriveFileIdSafe_(file),
+    getDriveFileMimeTypeSafe_(file),
+    getDriveFileSizeSafe_(file),
+    getDriveFileLastUpdatedSafe_(file)
+  ].join('|');
+}
+
+function getDriveFileIdSafe_(file) {
+  try {
+    return file.getId();
+  } catch (err) {
+    return '';
+  }
+}
+
+function getDriveFileMimeTypeSafe_(file) {
+  try {
+    return file.getMimeType();
+  } catch (err) {
+    return '';
+  }
+}
+
+function getDriveFileSizeSafe_(file) {
+  try {
+    return typeof file.getSize === 'function' ? file.getSize() : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+function getDriveFileLastUpdatedSafe_(file) {
+  try {
+    const updated = file.getLastUpdated();
+    return updated ? updated.getTime() : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+function getDriveFileUrlSafe_(file) {
+  try {
+    return file.getUrl();
+  } catch (err) {
+    return '';
   }
 }
 

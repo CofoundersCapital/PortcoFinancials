@@ -5,6 +5,7 @@ const CONFIG = {
   TRACKER_SHEET_NAME: 'Submissions',
   LOGS_SHEET_NAME: 'Logs',
   CLASSIFICATION_LOG_SHEET_NAME: 'Document Classification Log',
+  DRIVE_CLASSIFICATION_REGISTRY_SHEET_NAME: 'Drive Classification Registry',
   REQUIRED_DOCS_SHEET_NAME: 'Required Documents Checklist',
   FORM_TITLE: 'Monthly Financial Submission',
   INTAKE_EMAIL: 'cofoundersreporting@gmail.com',
@@ -99,6 +100,21 @@ const CLASSIFICATION_LOG_HEADERS = [
   'accepted_for_tracker',
   'reason',
   'unmatched_reason'
+];
+
+const DRIVE_CLASSIFICATION_REGISTRY_HEADERS = [
+  'timestamp',
+  'file_id',
+  'company_name',
+  'month',
+  'docs_signature',
+  'file_fingerprint',
+  'source',
+  'status',
+  'matched_doc_keys',
+  'file_name',
+  'file_url',
+  'reason'
 ];
 
 const MASTER_CONFIG_HEADERS = [
@@ -540,6 +556,7 @@ const MASTER_CONFIG_DEFINITIONS = [
 
 let MASTER_CONFIG_CACHE_ = null;
 let CONFIG_WARNING_CACHE_ = {};
+let DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = null;
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
