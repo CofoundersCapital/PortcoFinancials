@@ -82,6 +82,7 @@ function driveFolderWatcher() {
   const sheet = getTrackerSheet_();
   const docs = getRequiredDocs_();
   const records = getRecords_(sheet);
+  dedupeDriveClassificationRegistry_();
   clearDriveClassificationRegistryCache_();
   let updatedRows = 0;
   let classifiedFiles = 0;

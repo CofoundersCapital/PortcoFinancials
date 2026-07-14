@@ -72,7 +72,16 @@ function getDriveClassificationRegistrySheet_() {
     sheet.getRange(1, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setFontWeight('bold').setBackground('#e8f0fe');
     sheet.getRange(1, 1, sheet.getMaxRows(), DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).createFilter();
   }
+  applyDriveClassificationRegistryFormats_(sheet);
   return sheet;
+}
+
+function applyDriveClassificationRegistryFormats_(sheet) {
+  if (sheet.getMaxRows() < 2) {
+    return;
+  }
+  sheet.getRange(2, 1, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  sheet.getRange(2, 2, sheet.getMaxRows() - 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length - 1).setNumberFormat('@');
 }
 
 function getOrCreateSheet_(ss, name) {
@@ -351,7 +360,7 @@ function rememberDriveClassification_(file, record, docs, source, classification
     new Date(),
     fileId,
     record.company_name || '',
-    record.month || '',
+    normalizeRegistryMonthValue_(record.month),
     docsSignature,
     fingerprint,
     source || '',
@@ -363,11 +372,12 @@ function rememberDriveClassification_(file, record, docs, source, classification
   ];
 
   const sheet = getDriveClassificationRegistrySheet_();
-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setValues([row]);
-
   const key = buildDriveClassificationRegistryKey_(fileId, record.company_name, record.month, docsSignature);
   const registry = getDriveClassificationRegistryMap_();
-  registry[key] = buildDriveClassificationRegistryRecordFromRow_(row);
+  const existing = registry[key];
+  const rowNumber = existing && existing.rowNumber ? existing.rowNumber : sheet.getLastRow() + 1;
+  sheet.getRange(rowNumber, 1, 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setValues([row]);
+  registry[key] = buildDriveClassificationRegistryRecordFromRow_(row, rowNumber);
 }
 
 function shouldRememberDriveClassification_(classification) {
@@ -415,23 +425,106 @@ function getDriveClassificationRegistryMap_() {
   }
 
   const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).getValues();
-  rows.forEach(function (row) {
-    const record = buildDriveClassificationRegistryRecordFromRow_(row);
+  rows.forEach(function (row, index) {
+    const record = buildDriveClassificationRegistryRecordFromRow_(row, index + 2);
     if (!record.file_id || !record.docs_signature) {
       return;
     }
-    registry[buildDriveClassificationRegistryKey_(record.file_id, record.company_name, record.month, record.docs_signature)] = record;
+    const key = buildDriveClassificationRegistryKey_(record.file_id, record.company_name, record.month, record.docs_signature);
+    registry[key] = choosePreferredDriveClassificationRegistryRecord_(registry[key], record);
   });
 
   DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = registry;
   return registry;
 }
 
-function buildDriveClassificationRegistryRecordFromRow_(row) {
+function dedupeDriveClassificationRegistry_() {
+  const sheet = getDriveClassificationRegistrySheet_();
+  if (sheet.getLastRow() < 3) {
+    return;
+  }
+
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).getValues();
+  const recordsByKey = {};
+  const uniqueKeys = [];
+  rows.forEach(function (row, index) {
+    const record = buildDriveClassificationRegistryRecordFromRow_(row, index + 2);
+    if (!record.file_id || !record.docs_signature) {
+      uniqueKeys.push('row-' + index);
+      recordsByKey['row-' + index] = record;
+      return;
+    }
+
+    const key = buildDriveClassificationRegistryKey_(record.file_id, record.company_name, record.month, record.docs_signature);
+    if (!recordsByKey[key]) {
+      uniqueKeys.push(key);
+      recordsByKey[key] = record;
+      return;
+    }
+    recordsByKey[key] = choosePreferredDriveClassificationRegistryRecord_(recordsByKey[key], record);
+  });
+
+  const dedupedRows = uniqueKeys.map(function (key) {
+    return DRIVE_CLASSIFICATION_REGISTRY_HEADERS.map(function (header) {
+      return recordsByKey[key][header] || '';
+    });
+  });
+
+  if (dedupedRows.length === rows.length) {
+    return;
+  }
+
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).clearContent();
+  sheet.getRange(2, 1, dedupedRows.length, DRIVE_CLASSIFICATION_REGISTRY_HEADERS.length).setValues(dedupedRows);
+  DRIVE_CLASSIFICATION_REGISTRY_CACHE_ = null;
+  logEvent_('drive_classification_registry_deduped', '', '', 'Removed duplicate Drive classification registry rows', {
+    beforeRows: rows.length,
+    afterRows: dedupedRows.length,
+    removedRows: rows.length - dedupedRows.length
+  });
+}
+
+function choosePreferredDriveClassificationRegistryRecord_(current, candidate) {
+  if (!current) {
+    return candidate;
+  }
+  if (!candidate) {
+    return current;
+  }
+
+  const currentHasFingerprint = !isConfigBlank_(current.file_fingerprint);
+  const candidateHasFingerprint = !isConfigBlank_(candidate.file_fingerprint);
+  if (candidateHasFingerprint && !currentHasFingerprint) {
+    return candidate;
+  }
+  if (currentHasFingerprint && !candidateHasFingerprint) {
+    return current;
+  }
+
+  return getRegistryTimestampValue_(candidate) >= getRegistryTimestampValue_(current)
+    ? candidate
+    : current;
+}
+
+function getRegistryTimestampValue_(record) {
+  const timestamp = record ? record.timestamp : null;
+  if (Object.prototype.toString.call(timestamp) === '[object Date]') {
+    return timestamp.getTime();
+  }
+  const parsed = new Date(timestamp);
+  const time = parsed.getTime();
+  if (!isNaN(time)) {
+    return time;
+  }
+  return Number(record && record.rowNumber ? record.rowNumber : 0);
+}
+
+function buildDriveClassificationRegistryRecordFromRow_(row, rowNumber) {
   const record = {};
   DRIVE_CLASSIFICATION_REGISTRY_HEADERS.forEach(function (header, index) {
     record[header] = row[index];
   });
+  record.rowNumber = rowNumber || 0;
   return record;
 }
 
@@ -439,9 +532,16 @@ function buildDriveClassificationRegistryKey_(fileId, companyName, month, docsSi
   return [
     String(fileId || '').trim(),
     normalizeText_(companyName),
-    String(month || '').trim(),
+    normalizeRegistryMonthValue_(month),
     String(docsSignature || '').trim()
   ].join('|');
+}
+
+function normalizeRegistryMonthValue_(month) {
+  if (Object.prototype.toString.call(month) === '[object Date]' && !isNaN(month.getTime())) {
+    return formatMonth_(month);
+  }
+  return String(month || '').trim();
 }
 
 function buildRequiredDocsSignature_(docs) {
